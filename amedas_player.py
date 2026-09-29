@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v1.7 (変更時は VERSION 定数も更新)
+バージョン: v1.8 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -32,7 +32,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v1.7 (凡例を外へ・等温線の数値・年月選択)"
+VERSION = "v1.8 (気温凡例を絶対値で固定)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -301,8 +301,8 @@ def main():
     ap.add_argument("--no-terrain", action="store_true", help="海岸線・地形を表示しない")
     ap.add_argument("--relief", action="store_true", help="海岸線でなく標高の陰影図にする")
     ap.add_argument("--zoom", type=int, default=9, help="標高タイルのズーム(8-11、大きいほど細かい)")
-    ap.add_argument("--tmin", type=float, help="色の下限(℃)。省略時は読み込んだ期間の最低気温")
-    ap.add_argument("--tmax", type=float, help="色の上限(℃)。省略時は読み込んだ期間の最高気温")
+    ap.add_argument("--tmin", type=float, help="色の下限(℃)。省略時は -15")
+    ap.add_argument("--tmax", type=float, help="色の上限(℃)。省略時は 40")
     ap.add_argument("--smooth", type=float, default=4.0, help="等温線の平滑化の強さ(格子数、0で無し)")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
@@ -357,22 +357,14 @@ def main():
 
     # ---- 気温: 補間した等温線(線+数値)と等温帯(色)。右側に凡例 ----
     cmap = plt.get_cmap("RdYlBu_r")
+    # 色は絶対値で固定 (期間や月を変えても同じ気温は同じ色)。--tmin/--tmax で変更可。
+    tmin = np.floor((a.tmin if a.tmin is not None else -15.0) / a.step) * a.step
+    tmax = np.ceil((a.tmax if a.tmax is not None else 40.0) / a.step) * a.step
+    st = {"levels": np.arange(tmin, tmax + a.step / 2, a.step)}
+    st["norm"] = matplotlib.colors.BoundaryNorm(st["levels"], cmap.N, extend="both")
     cax = fig.add_axes([0.82, 0.52, 0.02, 0.38])
-    st = {"levels": None, "norm": None}
-
-    def set_levels():
-        t = S["temp"]
-        tmin = a.tmin if a.tmin is not None else np.floor(np.nanmin(t) / a.step) * a.step
-        tmax = a.tmax if a.tmax is not None else np.ceil(np.nanmax(t) / a.step) * a.step
-        if tmax <= tmin:
-            tmax = tmin + a.step
-        st["levels"] = np.arange(tmin, tmax + a.step / 2, a.step)
-        st["norm"] = matplotlib.colors.BoundaryNorm(st["levels"], cmap.N, extend="both")
-        cax.clear()
-        fig.colorbar(matplotlib.cm.ScalarMappable(norm=st["norm"], cmap=cmap), cax=cax,
-                     label="気温 (℃)", ticks=st["levels"][::max(1, int(round(5 / a.step)))])
-
-    set_levels()
+    fig.colorbar(matplotlib.cm.ScalarMappable(norm=st["norm"], cmap=cmap), cax=cax,
+                 label="気温 (℃)", ticks=st["levels"][::max(1, int(round(5 / a.step)))])
     contours, labels = [], []
 
     # 平滑化用の格子 (約0.02度刻み)
@@ -500,7 +492,6 @@ def main():
             S.update(old); msg.set_text(f"{y}-{m:02d} のCSVがありません"); fig.canvas.draw_idle(); return
         msg.set_text("")
         state["playing"] = False
-        set_levels()
         slider.valmax = len(S["times"]) - 1
         slider.ax.set_xlim(slider.valmin, slider.valmax)
         state["i"] = 0
