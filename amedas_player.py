@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.0 (変更時は VERSION 定数も更新)
+バージョン: v2.1 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -32,7 +32,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, CheckButtons, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.0 (気温・風・地点のON/OFFと標高の段彩図)"
+VERSION = "v2.1 (気温・風・地点のON/OFF)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -284,22 +284,17 @@ def set_visible(arts, flag):
             art.set_visible(flag)
 
 
-ELEV_LEVELS = [0, 100, 200, 500, 1000, 1500, 2000, 2500]
-ELEV_COLORS = ["#a8d5a2", "#d6e8a0", "#f3e7a1", "#e2c17d", "#c69a62", "#a77b52", "#d9cfc6", "#ffffff"]
-
-
 def draw_coast(ax, elev, extent, show_elev=True):
-    """海岸線(標高データが無い所=海・湖との境界)と標高を描く。戻り値は表示切替用の描画物。
-    gray : 気温の色を邪魔しない灰色の陰影+等高線 (気温表示ONのとき)
-    color: 段彩図(標高帯ごとの色+等高線と数値) (気温・風をOFFにして標高だけ見るとき)"""
-    from matplotlib.colors import LightSource, ListedColormap, BoundaryNorm
+    """海岸線(標高データが無い所=海・湖との境界)と、灰色の標高(陰影+等高線)を描く。
+    戻り値は表示切替用の描画物。気温の色を邪魔しないよう標高は無彩色。"""
+    from matplotlib.colors import LightSource
     land = ~np.isnan(elev)
     lon0, lon1, lat0, lat1 = extent
     lons = np.linspace(lon0, lon1, elev.shape[1])
     lats = np.linspace(lat1, lat0, elev.shape[0])
     e = np.nan_to_num(elev, nan=0.0)
     sea = np.array([0.80, 0.88, 0.95])
-    G = {"gray": [], "color": []}
+    G = {"gray": []}
 
     base = np.zeros(elev.shape + (3,))
     base[~land] = sea
@@ -316,16 +311,6 @@ def draw_coast(ax, elev, extent, show_elev=True):
                         colors="0.45", linewidths=0.4, zorder=0.5)
         G["gray"] += [cs, *cs.clabel(fmt="%dm", fontsize=6, inline=True)]
 
-        # 段彩図: 標高帯ごとに色分け(海は水色)。最初は非表示。
-        cmap = ListedColormap(ELEV_COLORS)
-        norm = BoundaryNorm(ELEV_LEVELS, cmap.N, extend="max")
-        col = cmap(norm(np.where(land, e, 0.0)))[..., :3]
-        col[~land] = sea
-        im = ax.imshow(col, extent=extent, origin="upper", zorder=0.2, aspect="auto")
-        cs2 = ax.contour(lons, lats, np.nan_to_num(elev, nan=-1), levels=ELEV_LEVELS[2:],
-                         colors="#5a4632", linewidths=0.6, zorder=0.6)
-        G["color"] += [im, cs2, *cs2.clabel(fmt="%dm", fontsize=8, inline=True)]
-        set_visible(G["color"], False)
     ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=2.5)
     return G
 
@@ -384,7 +369,7 @@ def main():
 
     fig, ax = plt.subplots(figsize=(12, 8))
     plt.subplots_adjust(left=0.07, right=0.78, top=0.94, bottom=0.2)
-    bg = {"gray": [], "color": []}
+    bg = {"gray": []}
     if not a.no_terrain:
         m = 0.15
         box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
@@ -401,7 +386,7 @@ def main():
     ax.set_aspect(1 / np.cos(np.radians(lat.mean())))
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
-    # 表示のON/OFF (画面下のチェックボックス)。気温をOFFにすると標高の段彩図が見える。
+    # 表示のON/OFF (画面下のチェックボックス)。気温・風をOFFにすると標高(灰色)だけ見える。
     show = {"temp": True, "wind": True, "pts": True}
     pts_arts = [ax.scatter(lon, lat, s=6, c="k", zorder=2.6)]
     for n, x, y in zip(names, lon, lat):
@@ -501,29 +486,13 @@ def main():
         lax.text(2, 8, "矢印は風の吹く向き", fontsize=8, va="center", color="0.3")
         fig.canvas.draw_idle()
 
-    has_elev = bool(bg["color"])
-    eax = fig.add_axes([0.82, 0.16, 0.14, 0.015]) if has_elev else None
-
-    def draw_elev_legend(color_mode):
-        """標高の凡例。灰色モード=連続グレー、色モード=標高帯ごとの色"""
-        eax.clear()
-        if color_mode:
-            from matplotlib.colors import ListedColormap
-            n = len(ELEV_LEVELS) - 1
-            eax.pcolormesh(np.arange(n + 1), [0, 1], np.arange(n)[None, :],
-                           cmap=ListedColormap(ELEV_COLORS[:n]), vmin=-0.5, vmax=n - 0.5)
-            eax.set_xticks(np.arange(n + 1))  # 帯の境界に標高を表示(帯の幅は等間隔)
-            eax.set_xticklabels([str(v) for v in ELEV_LEVELS])
-        else:
-            eax.imshow(np.linspace(0.97, 0.67, 100)[None, :].repeat(2, 0), cmap="gray", vmin=0, vmax=1,
-                       aspect="auto", extent=(0, 2500, 0, 1))
-            eax.set_xticks([0, 500, 1000, 1500, 2000, 2500])
-        eax.set_yticks([])
+    if bg["gray"] and not a.relief:
+        eax = fig.add_axes([0.82, 0.16, 0.14, 0.015])
+        eax.imshow(np.linspace(0.97, 0.67, 100)[None, :].repeat(2, 0), cmap="gray", vmin=0, vmax=1,
+                   aspect="auto", extent=(0, 2500, 0, 1))
+        eax.set_yticks([]); eax.set_xticks([0, 500, 1000, 1500, 2000, 2500])
         eax.tick_params(labelsize=7)
         eax.set_xlabel("標高 (m)", fontsize=8)
-
-    if has_elev:
-        draw_elev_legend(False)
 
     def apply_view():
         """チェックボックスの状態を表示に反映する"""
@@ -531,11 +500,6 @@ def main():
         q.set_visible(show["wind"])
         lax.set_visible(show["wind"])
         cax.set_visible(show["temp"])
-        if has_elev:
-            color_mode = not show["temp"]  # 気温OFF → 標高を色で見る
-            set_visible(bg["gray"], not color_mode)
-            set_visible(bg["color"], color_mode)
-            draw_elev_legend(color_mode)
 
     fig.canvas.mpl_connect("draw_event", draw_wind_legend)
     title = ax.set_title("")
