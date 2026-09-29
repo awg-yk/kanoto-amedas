@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v1.6 (変更時は VERSION 定数も更新)
+バージョン: v1.7 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -29,10 +29,10 @@ import matplotlib.tri
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Button, Slider
+from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v1.6 (等温線の平滑化・風速凡例)"
+VERSION = "v1.7 (凡例を外へ・等温線の数値・年月選択)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -184,7 +184,7 @@ def find_files(folder, start, end):
 def load(folder, start, end):
     files = find_files(folder, start, end)
     if not files:
-        raise SystemExit(f"{start}〜{end} のCSVが見つかりません: {folder}\\{PATTERN}")
+        raise FileNotFoundError(f"{start}〜{end} のCSVが見つかりません: {folder}\\{PATTERN}")
     print(f"{len(files)} ファイルを読み込み中 ...")
     parts = [parse_csv(f) for f in files]
     stations = []  # 年によって地点数が違っても対応できるよう和集合をとる
@@ -285,6 +285,12 @@ def draw_coast(ax, elev, extent):
     ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=2.5)
 
 
+def month_range(y, m):
+    first = datetime.date(y, m, 1)
+    last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
+    return first, last
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=DEFAULT_DIR, help="「時別値」フォルダの親(サブフォルダも検索)")
@@ -304,22 +310,34 @@ def main():
 
     print("amedas_player", VERSION, "/", os.path.abspath(__file__))
     start = datetime.date.fromisoformat(a.start)
-    end = (datetime.date.fromisoformat(a.end) if a.end else
-           (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1))
-    stations, times, temp, wind, wdir = load(a.dir, start, end)
-    print(f"{start} 〜 {end}: {len(times)} 時刻")
-    keep = [i for i, s in enumerate(stations)
-            if s in COORDS and (a.islands or COORDS[s][0] >= ISLAND_LAT)]
-    for s in stations:
-        if s not in COORDS:
-            print("座標未登録(スキップ):", s)
-    names = [stations[i] for i in keep]
+    end = (datetime.date.fromisoformat(a.end) if a.end else month_range(start.year, start.month)[1])
+
+    # 表示する地点は座標表(COORDS)で固定し、CSV側に無い地点は欠測(NaN)にする。
+    # これで年月を切り替えても地点・地図の枠は変わらない。
+    names = [n for n in COORDS if a.islands or COORDS[n][0] >= ISLAND_LAT]
     lat = np.array([COORDS[n][0] for n in names])
     lon = np.array([COORDS[n][1] for n in names])
-    temp, wind, wdir = temp[:, keep], wind[:, keep], wdir[:, keep]
+    S = {}  # 現在表示中のデータ: times, temp, wind, wdir
 
-    fig, ax = plt.subplots(figsize=(11, 8))
-    plt.subplots_adjust(bottom=0.15)
+    def read(d0, d1):
+        stations, times, temp, wind, wdir = load(a.dir, d0, d1)
+        if not times:
+            raise FileNotFoundError(f"{d0}〜{d1} のデータ行がありません")
+        for st in stations:
+            if st not in COORDS:
+                print("座標未登録(スキップ):", st)
+        idx = [stations.index(n) if n in stations else -1 for n in names]
+        pick = lambda arr: np.stack([arr[:, k] if k >= 0 else np.full(len(times), np.nan) for k in idx], axis=1)
+        S.update(times=times, temp=pick(temp), wind=pick(wind), wdir=pick(wdir), start=d0, end=d1)
+        print(f"{d0} 〜 {d1}: {len(times)} 時刻")
+
+    try:
+        read(start, end)
+    except FileNotFoundError as e:
+        raise SystemExit(str(e))
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    plt.subplots_adjust(left=0.07, right=0.78, top=0.94, bottom=0.2)
     if not a.no_terrain:
         m = 0.15
         box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
@@ -333,43 +351,64 @@ def main():
     ax.set_aspect(1 / np.cos(np.radians(lat.mean())))
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
-    # 気温: 観測点から三角形分割で補間した等温線(線)と等温帯(色)。地点は小さな黒点。
-    tmin = a.tmin if a.tmin is not None else np.floor(np.nanmin(temp) / a.step) * a.step
-    tmax = a.tmax if a.tmax is not None else np.ceil(np.nanmax(temp) / a.step) * a.step
-    levels = np.arange(tmin, tmax + a.step / 2, a.step)
-    cmap = plt.get_cmap("RdYlBu_r")
-    norm = matplotlib.colors.BoundaryNorm(levels, cmap.N, extend="both")
-    fig.colorbar(matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax,
-                 label="気温 (℃)", shrink=0.7, ticks=levels[::max(1, int(round(5 / a.step)))])
     ax.scatter(lon, lat, s=6, c="k", zorder=2.6)
-    contours = []
+    for n, x, y in zip(names, lon, lat):
+        ax.annotate(n, (x, y), xytext=(8, -3), textcoords="offset points", fontsize=7)
+
+    # ---- 気温: 補間した等温線(線+数値)と等温帯(色)。右側に凡例 ----
+    cmap = plt.get_cmap("RdYlBu_r")
+    cax = fig.add_axes([0.82, 0.52, 0.02, 0.38])
+    st = {"levels": None, "norm": None}
+
+    def set_levels():
+        t = S["temp"]
+        tmin = a.tmin if a.tmin is not None else np.floor(np.nanmin(t) / a.step) * a.step
+        tmax = a.tmax if a.tmax is not None else np.ceil(np.nanmax(t) / a.step) * a.step
+        if tmax <= tmin:
+            tmax = tmin + a.step
+        st["levels"] = np.arange(tmin, tmax + a.step / 2, a.step)
+        st["norm"] = matplotlib.colors.BoundaryNorm(st["levels"], cmap.N, extend="both")
+        cax.clear()
+        fig.colorbar(matplotlib.cm.ScalarMappable(norm=st["norm"], cmap=cmap), cax=cax,
+                     label="気温 (℃)", ticks=st["levels"][::max(1, int(round(5 / a.step)))])
+
+    set_levels()
+    contours, labels = [], []
 
     # 平滑化用の格子 (約0.02度刻み)
     gx = np.linspace(lon.min() - 0.1, lon.max() + 0.1, 220)
     gy = np.linspace(lat.min() - 0.1, lat.max() + 0.1, 200)
     GX, GY = np.meshgrid(gx, gy)
-    kern = np.exp(-0.5 * (np.arange(-3 * 6, 3 * 6 + 1) / max(a.smooth, 0.1)) ** 2)
+    kern = np.exp(-0.5 * (np.arange(-18, 19) / max(a.smooth, 0.1)) ** 2)
     kern /= kern.sum()
 
     def smooth(field):
         """欠測(マスク)を無視した正規化ガウス平滑化"""
         valid = ~np.ma.getmaskarray(field)
         v = np.where(valid, np.ma.filled(field, 0.0), 0.0)
-        def conv(m):
-            m = np.apply_along_axis(lambda r: np.convolve(r, kern, mode="same"), 1, m)
-            return np.apply_along_axis(lambda c: np.convolve(c, kern, mode="same"), 0, m)
-        num, den = conv(v), conv(valid.astype(float))
-        out = np.ma.masked_where(~valid | (den < 1e-3), num / np.maximum(den, 1e-3))
-        return out
 
-    def draw_temp(t):
+        def conv(mm):
+            mm = np.apply_along_axis(lambda r: np.convolve(r, kern, mode="same"), 1, mm)
+            return np.apply_along_axis(lambda c: np.convolve(c, kern, mode="same"), 0, mm)
+        num, den = conv(v), conv(valid.astype(float))
+        return np.ma.masked_where(~valid | (den < 1e-3), num / np.maximum(den, 1e-3))
+
+    def clear_temp():
         for c in contours:
             try:
                 c.remove()
             except Exception:
                 for coll in c.collections:
                     coll.remove()
-        contours.clear()
+        for t in labels:
+            try:
+                t.remove()
+            except Exception:
+                pass
+        contours.clear(); labels.clear()
+
+    def draw_temp(t):
+        clear_temp()
         ok = ~np.isnan(t)
         if ok.sum() < 4:
             return
@@ -378,54 +417,122 @@ def main():
             z = matplotlib.tri.CubicTriInterpolator(tri, t[ok], kind="min_E")(GX, GY)
             if a.smooth > 0:
                 z = smooth(z)
-            contours.append(ax.contourf(GX, GY, z, levels=levels, cmap=cmap, norm=norm,
+            lv, nm = st["levels"], st["norm"]
+            contours.append(ax.contourf(GX, GY, z, levels=lv, cmap=cmap, norm=nm,
                                         extend="both", alpha=0.6, zorder=1))
-            contours.append(ax.contour(GX, GY, z, levels=levels, colors="k",
-                                       linewidths=0.5, alpha=0.6, zorder=2))
+            cl = ax.contour(GX, GY, z, levels=lv, colors="k", linewidths=0.5, alpha=0.7, zorder=2)
+            contours.append(cl)
+            labels.extend(cl.clabel(fmt="%g", fontsize=7, inline=True, inline_spacing=3))
         except Exception as e:
             print("等温線を描けませんでした:", e)
 
+    # ---- 風: 矢印 ----
     q = ax.quiver(lon, lat, np.zeros(len(lon)), np.zeros(len(lon)), angles="xy",
                   scale_units="xy", scale=25, width=0.003, zorder=3)
-    # 風速の凡例 (左下)。矢印の長さ=風速 (本体の矢印と同じ縮尺)
-    xl, yl = ax.get_xlim()[0], ax.get_ylim()[0]
-    ax.add_patch(matplotlib.patches.Rectangle((xl + 0.03, yl + 0.03), 0.72, 0.40, fc="white", ec="0.5",
-                                              alpha=0.9, zorder=4))
-    ax.text(xl + 0.06, yl + 0.34, "風速の凡例", fontsize=8, zorder=6)
-    for k, v in enumerate((1, 5)):
-        y = yl + 0.24 - 0.11 * k
-        ax.quiver([xl + 0.08], [y], [v], [0], angles="xy", scale_units="xy", scale=25,
-                  width=0.003, color="k", zorder=6)
-        ax.text(xl + 0.08 + v / 25 + 0.03, y - 0.015, f"{v} m/s", fontsize=8, zorder=6)
+
+    # ---- 風速の凡例: 右側(カラーバーの下)。本体の矢印と同じ長さ(ピクセル)で描く ----
+    lax = fig.add_axes([0.80, 0.22, 0.19, 0.24])
+    lax.axis("off")
+    legend_state = {"px": None}
+
+    def draw_wind_legend(_=None):
+        p0 = ax.transData.transform((lon.min(), lat.min()))
+        p1 = ax.transData.transform((lon.min() + 1.0, lat.min()))
+        px_deg = p1[0] - p0[0]  # 経度1度あたりのピクセル数
+        if legend_state["px"] is not None and abs(legend_state["px"] - px_deg) < 0.5:
+            return
+        legend_state["px"] = px_deg
+        lax.clear(); lax.axis("off")
+        bb = lax.get_window_extent()
+        lax.set_xlim(0, bb.width); lax.set_ylim(0, bb.height)
+        lax.text(2, bb.height - 12, "風速の凡例 (矢印の長さ)", fontsize=9, va="center")
+        width_px = 0.003 * ax.get_window_extent().width
+        for k, v in enumerate((1, 5, 10)):
+            y = bb.height - 40 - 32 * k
+            lax.quiver([8], [y], [v / 25 * px_deg], [0], angles="xy", scale_units="xy", scale=1,
+                       units="dots", width=width_px, color="k")
+            lax.text(8 + v / 25 * px_deg + 8, y, f"{v} m/s", fontsize=9, va="center")
+        lax.text(2, 8, "矢印は風の吹く向き", fontsize=8, va="center", color="0.3")
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("draw_event", draw_wind_legend)
     title = ax.set_title("")
 
     def update(i):
-        draw_temp(temp[i])
-        ang = np.radians(wdir[i] * 22.5 + 180)  # 風が吹いていく向き
-        u, v = wind[i] * np.sin(ang), wind[i] * np.cos(ang)
-        bad = np.isnan(u) | (wdir[i] < 0)  # 欠測・静穏は矢印なし
+        draw_temp(S["temp"][i])
+        w, d = S["wind"][i], S["wdir"][i]
+        ang = np.radians(d * 22.5 + 180)  # 風が吹いていく向き
+        u, v = w * np.sin(ang), w * np.cos(ang)
+        bad = np.isnan(u) | (d < 0)  # 欠測・静穏は矢印なし
         q.set_UVC(np.where(bad, 0, u), np.where(bad, 0, v))
-        title.set_text(f"{times[i]}   (矢印: 風の向き, 長さ=風速)   [{VERSION.split()[0]}]")
+        title.set_text(f"{S['times'][i]}   [{VERSION.split()[0]}]")
         fig.canvas.draw_idle()
 
     if a.save:
-        anim = FuncAnimation(fig, lambda i: update(i), frames=len(times), interval=a.interval)
+        anim = FuncAnimation(fig, lambda i: update(i), frames=len(S["times"]), interval=a.interval)
         anim.save(a.save, dpi=100)
         print("保存:", a.save)
         return
 
+    # ---- 操作部: 時刻スライダー / 再生 / 年月の選択 ----
     state = {"i": 0, "playing": False}
     sax = plt.axes([0.15, 0.04, 0.6, 0.03])
-    slider = Slider(sax, "時刻", 0, len(times) - 1, valinit=0, valstep=1)
-    bax = plt.axes([0.8, 0.03, 0.08, 0.05])
-    btn = Button(bax, "再生/停止")
+    slider = Slider(sax, "時刻", 0, len(S["times"]) - 1, valinit=0, valstep=1)
+    btn = Button(plt.axes([0.80, 0.03, 0.09, 0.05]), "再生/停止")
+    b_prev = Button(plt.axes([0.15, 0.10, 0.07, 0.05]), "◀ 前月")
+    tb = TextBox(plt.axes([0.30, 0.10, 0.09, 0.05]), "年月 ", initial=f"{S['start'].year}-{S['start'].month:02d}")
+    b_next = Button(plt.axes([0.44, 0.10, 0.07, 0.05]), "次月 ▶")
+    b_y = Button(plt.axes([0.55, 0.10, 0.06, 0.05]), "-1年")
+    b_y2 = Button(plt.axes([0.62, 0.10, 0.06, 0.05]), "+1年")
+    msg = fig.text(0.15, 0.165, "", fontsize=9, color="crimson")
+
+    def load_month(y, m):
+        """指定の年月を読み込んで表示を切り替える。CSVが無い場合は元の表示のまま。"""
+        try:
+            d0, d1 = month_range(y, m)
+        except ValueError:
+            msg.set_text("年月は YYYY-MM の形式で入力してください"); fig.canvas.draw_idle(); return
+        msg.set_text(f"{y}-{m:02d} を読み込み中 ..."); fig.canvas.draw()
+        old = dict(S)
+        try:
+            read(d0, d1)
+        except FileNotFoundError as e:
+            S.update(old); msg.set_text(f"{y}-{m:02d} のCSVがありません"); fig.canvas.draw_idle(); return
+        msg.set_text("")
+        state["playing"] = False
+        set_levels()
+        slider.valmax = len(S["times"]) - 1
+        slider.ax.set_xlim(slider.valmin, slider.valmax)
+        state["i"] = 0
+        slider.set_val(0)
+        tb.set_val(f"{y}-{m:02d}")
+        update(0)
+
+    def shift(months):
+        d = S["start"]
+        k = d.year * 12 + d.month - 1 + months
+        load_month(k // 12, k % 12 + 1)
+
+    def on_submit(text):
+        try:
+            y, m = (int(x) for x in text.strip().replace("/", "-").split("-")[:2])
+        except ValueError:
+            msg.set_text("年月は YYYY-MM の形式で入力してください"); fig.canvas.draw_idle(); return
+        if (y, m) != (S["start"].year, S["start"].month):
+            load_month(y, m)
+
+    b_prev.on_clicked(lambda e: shift(-1))
+    b_next.on_clicked(lambda e: shift(1))
+    b_y.on_clicked(lambda e: shift(-12))
+    b_y2.on_clicked(lambda e: shift(12))
+    tb.on_submit(on_submit)
 
     def on_slide(v):
         state["i"] = int(v); update(state["i"])
 
     def tick(_):
         if state["playing"]:
-            slider.set_val((state["i"] + 1) % len(times))
+            slider.set_val((state["i"] + 1) % len(S["times"]))
 
     slider.on_changed(on_slide)
     btn.on_clicked(lambda e: state.update(playing=not state["playing"]))
