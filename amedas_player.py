@@ -9,7 +9,10 @@
 import argparse
 import csv
 import glob
+import io
+import math
 import os
+import urllib.request
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -166,11 +169,69 @@ def load(folder):
     return stations, T, np.vstack(TP), np.vstack(W), np.vstack(D)
 
 
+DEM_URL = "https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png"  # 国土地理院 標高タイル
+
+
+def _tile_xy(lon, lat, z):
+    n = 2 ** z
+    x = (lon + 180) / 360 * n
+    y = (1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n
+    return x, y
+
+
+def load_terrain(lon0, lon1, lat0, lat1, z, cache_dir):
+    """国土地理院DEMタイルを取得して (標高[m], extent) を返す。取得済みはキャッシュ。"""
+    from PIL import Image
+    cache = os.path.join(cache_dir, f"terrain_z{z}_{lon0:.2f}_{lon1:.2f}_{lat0:.2f}_{lat1:.2f}.npz")
+    if os.path.exists(cache):
+        d = np.load(cache)
+        return d["elev"], tuple(d["extent"])
+    x0, y1 = _tile_xy(lon0, lat0, z)
+    x1, y0 = _tile_xy(lon1, lat1, z)
+    tx0, tx1, ty0, ty1 = int(x0), int(x1), int(y0), int(y1)
+    W, H = (tx1 - tx0 + 1) * 256, (ty1 - ty0 + 1) * 256
+    mosaic = np.full((H, W), np.nan)
+    print(f"標高タイルを取得中 ({(tx1 - tx0 + 1) * (ty1 - ty0 + 1)} 枚, z={z}) ...")
+    for tx in range(tx0, tx1 + 1):
+        for ty in range(ty0, ty1 + 1):
+            try:
+                with urllib.request.urlopen(DEM_URL.format(z=z, x=tx, y=ty), timeout=30) as r:
+                    im = np.array(Image.open(io.BytesIO(r.read())).convert("RGB")).astype(np.int64)
+            except Exception as e:  # 海上などタイルが無い場合は海扱い
+                print("  タイルなし/失敗:", tx, ty, e)
+                continue
+            v = im[..., 0] * 65536 + im[..., 1] * 256 + im[..., 2]
+            v = np.where(v == 2 ** 23, np.nan, np.where(v > 2 ** 23, v - 2 ** 24, v) / 100.0)  # 2^23=無効
+            mosaic[(ty - ty0) * 256:(ty - ty0 + 1) * 256, (tx - tx0) * 256:(tx - tx0 + 1) * 256] = v
+    # メルカトル画素 -> 緯度経度の等間隔格子に再サンプリング
+    nx, ny = 900, int(900 * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
+    lons = np.linspace(lon0, lon1, nx)
+    lats = np.linspace(lat1, lat0, ny)
+    px = np.clip(((lons + 180) / 360 * 2 ** z - tx0) * 256, 0, W - 1).astype(int)
+    py = np.clip(((1 - np.arcsinh(np.tan(np.radians(lats))) / math.pi) / 2 * 2 ** z - ty0) * 256, 0, H - 1).astype(int)
+    elev = mosaic[np.ix_(py, px)]
+    extent = (lon0, lon1, lat0, lat1)
+    np.savez_compressed(cache, elev=elev, extent=np.array(extent))
+    return elev, extent
+
+
+def draw_terrain(ax, elev, extent):
+    from matplotlib.colors import LightSource
+    e = np.nan_to_num(elev, nan=0.0)
+    ls = LightSource(azdeg=315, altdeg=45)
+    shade = ls.hillshade(e, vert_exag=8, dx=1, dy=1)
+    rgb = plt.cm.terrain(np.clip(e, 0, 2500) / 2500 * 0.85 + 0.15)[..., :3] * (0.55 + 0.45 * shade[..., None])
+    rgb[np.isnan(elev)] = (0.75, 0.85, 0.95)  # 海
+    ax.imshow(rgb, extent=extent, origin="upper", zorder=0, aspect="auto")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=DEFAULT_DIR)
     ap.add_argument("--islands", action="store_true", help="離島も表示")
     ap.add_argument("--interval", type=int, default=500, help="1時間あたりのms")
+    ap.add_argument("--no-terrain", action="store_true", help="地形を表示しない")
+    ap.add_argument("--zoom", type=int, default=9, help="標高タイルのズーム(8-11、大きいほど細かい)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
 
@@ -188,6 +249,16 @@ def main():
     fig, ax = plt.subplots(figsize=(11, 8))
     plt.subplots_adjust(bottom=0.15)
     ax.set_aspect(1 / np.cos(np.radians(lat.mean())))
+    if not a.no_terrain:
+        m = 0.15
+        box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
+        try:
+            elev, ext = load_terrain(*box, a.zoom, a.dir)
+            draw_terrain(ax, elev, ext)
+        except Exception as e:
+            print("地形の取得に失敗したため地形なしで続行:", e)
+    ax.set_xlim(lon.min() - 0.15, lon.max() + 0.15)
+    ax.set_ylim(lat.min() - 0.15, lat.max() + 0.15)
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
     sc = ax.scatter(lon, lat, c=temp[0], cmap="RdYlBu_r", vmin=TMIN, vmax=TMAX,
