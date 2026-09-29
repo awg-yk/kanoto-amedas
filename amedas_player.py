@@ -20,6 +20,9 @@ import urllib.error
 import urllib.request
 
 import matplotlib
+import matplotlib.cm
+import matplotlib.colors
+import matplotlib.tri
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
@@ -275,7 +278,7 @@ def draw_coast(ax, elev, extent):
     lon0, lon1, lat0, lat1 = extent
     lons = np.linspace(lon0, lon1, elev.shape[1])
     lats = np.linspace(lat1, lat0, elev.shape[0])
-    ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=1)
+    ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=2.5)
 
 
 def main():
@@ -288,6 +291,9 @@ def main():
     ap.add_argument("--no-terrain", action="store_true", help="海岸線・地形を表示しない")
     ap.add_argument("--relief", action="store_true", help="海岸線でなく標高の陰影図にする")
     ap.add_argument("--zoom", type=int, default=9, help="標高タイルのズーム(8-11、大きいほど細かい)")
+    ap.add_argument("--tmin", type=float, help="色の下限(℃)。省略時は読み込んだ期間の最低気温")
+    ap.add_argument("--tmax", type=float, help="色の上限(℃)。省略時は読み込んだ期間の最高気温")
+    ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
 
@@ -309,7 +315,6 @@ def main():
 
     fig, ax = plt.subplots(figsize=(11, 8))
     plt.subplots_adjust(bottom=0.15)
-    ax.set_aspect(1 / np.cos(np.radians(lat.mean())))
     if not a.no_terrain:
         m = 0.15
         box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
@@ -320,11 +325,39 @@ def main():
             print("地形の取得に失敗したため地形なしで続行:", e)
     ax.set_xlim(lon.min() - 0.15, lon.max() + 0.15)
     ax.set_ylim(lat.min() - 0.15, lat.max() + 0.15)
+    ax.set_aspect(1 / np.cos(np.radians(lat.mean())))
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
-    sc = ax.scatter(lon, lat, c=temp[0], cmap="RdYlBu_r", vmin=TMIN, vmax=TMAX,
-                    s=260, edgecolors="k", linewidths=0.4, zorder=2)
-    fig.colorbar(sc, ax=ax, label="気温 (℃)", shrink=0.7)
+    # 気温: 観測点から三角形分割で補間した等温線(線)と等温帯(色)。地点は小さな黒点。
+    tmin = a.tmin if a.tmin is not None else np.floor(np.nanmin(temp) / a.step) * a.step
+    tmax = a.tmax if a.tmax is not None else np.ceil(np.nanmax(temp) / a.step) * a.step
+    levels = np.arange(tmin, tmax + a.step / 2, a.step)
+    cmap = plt.get_cmap("RdYlBu_r")
+    norm = matplotlib.colors.BoundaryNorm(levels, cmap.N, extend="both")
+    fig.colorbar(matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax,
+                 label="気温 (℃)", shrink=0.7, ticks=levels[::max(1, int(round(5 / a.step)))])
+    ax.scatter(lon, lat, s=6, c="k", zorder=2.6)
+    contours = []
+
+    def draw_temp(t):
+        for c in contours:
+            try:
+                c.remove()
+            except Exception:
+                for coll in c.collections:
+                    coll.remove()
+        contours.clear()
+        ok = ~np.isnan(t)
+        if ok.sum() < 4:
+            return
+        try:
+            tri = matplotlib.tri.Triangulation(lon[ok], lat[ok])
+            contours.append(ax.tricontourf(tri, t[ok], levels=levels, cmap=cmap, norm=norm,
+                                           extend="both", alpha=0.6, zorder=1))
+            contours.append(ax.tricontour(tri, t[ok], levels=levels, colors="k",
+                                          linewidths=0.5, alpha=0.6, zorder=2))
+        except Exception:
+            pass  # 点が一直線に並ぶ等で三角形分割できない場合は描かない
     for n, x, y in zip(names, lon, lat):
         ax.annotate(n, (x, y), xytext=(8, -3), textcoords="offset points", fontsize=7)
     q = ax.quiver(lon, lat, np.zeros(len(lon)), np.zeros(len(lon)), angles="xy",
@@ -332,7 +365,7 @@ def main():
     title = ax.set_title("")
 
     def update(i):
-        sc.set_array(np.ma.masked_invalid(temp[i]))
+        draw_temp(temp[i])
         ang = np.radians(wdir[i] * 22.5 + 180)  # 風が吹いていく向き
         u, v = wind[i] * np.sin(ang), wind[i] * np.cos(ang)
         bad = np.isnan(u) | (wdir[i] < 0)  # 欠測・静穏は矢印なし
