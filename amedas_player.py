@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v1.8 (変更時は VERSION 定数も更新)
+バージョン: v1.9 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -32,7 +32,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v1.8 (気温凡例を絶対値で固定)"
+VERSION = "v1.9 (標高表示・±1時間ボタン)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -274,14 +274,30 @@ def draw_terrain(ax, elev, extent):
     ax.imshow(rgb, extent=extent, origin="upper", zorder=0, aspect="auto")
 
 
-def draw_coast(ax, elev, extent):
-    """標高データが無い(=海・湖)所を水色、陸を薄い色にして、境界を海岸線として描く。"""
+def draw_coast(ax, elev, extent, show_elev=True):
+    """海岸線(標高データが無い所=海・湖との境界)と、灰色の標高(陰影+等高線)を描く。
+    気温の色を邪魔しないよう標高は無彩色にしている。"""
+    from matplotlib.colors import LightSource
     land = ~np.isnan(elev)
-    rgb = np.where(land[..., None], np.array([0.95, 0.94, 0.90]), np.array([0.80, 0.88, 0.95]))
-    ax.imshow(rgb, extent=extent, origin="upper", zorder=0, aspect="auto")
     lon0, lon1, lat0, lat1 = extent
+    rgb = np.zeros(elev.shape + (3,))
+    rgb[~land] = (0.80, 0.88, 0.95)  # 海
+    if show_elev:
+        e = np.nan_to_num(elev, nan=0.0)
+        shade = LightSource(azdeg=315, altdeg=45).hillshade(e, vert_exag=8, dx=1, dy=1)
+        base = 0.97 - 0.30 * np.clip(e / 2500.0, 0, 1)  # 高いほど濃い灰色
+        g = np.clip(base * (0.6 + 0.4 * shade), 0, 1)
+        rgb[land] = np.stack([g, g, g], axis=-1)[land]
+    else:
+        rgb[land] = (0.95, 0.94, 0.90)
+    ax.imshow(rgb, extent=extent, origin="upper", zorder=0, aspect="auto")
     lons = np.linspace(lon0, lon1, elev.shape[1])
     lats = np.linspace(lat1, lat0, elev.shape[0])
+    if show_elev:
+        lv = [200, 500, 1000, 1500, 2000]
+        cs = ax.contour(lons, lats, np.nan_to_num(elev, nan=-1), levels=lv, colors="0.45",
+                        linewidths=0.4, zorder=0.5)
+        cs.clabel(fmt="%dm", fontsize=6, inline=True)
     ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=2.5)
 
 
@@ -300,6 +316,7 @@ def main():
     ap.add_argument("--interval", type=int, default=500, help="1時間あたりのms")
     ap.add_argument("--no-terrain", action="store_true", help="海岸線・地形を表示しない")
     ap.add_argument("--relief", action="store_true", help="海岸線でなく標高の陰影図にする")
+    ap.add_argument("--no-elev", action="store_true", help="標高(灰色の陰影・等高線)を描かず海岸線だけにする")
     ap.add_argument("--zoom", type=int, default=9, help="標高タイルのズーム(8-11、大きいほど細かい)")
     ap.add_argument("--tmin", type=float, help="色の下限(℃)。省略時は -15")
     ap.add_argument("--tmax", type=float, help="色の上限(℃)。省略時は 40")
@@ -343,7 +360,10 @@ def main():
         box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
         try:
             elev, ext = load_terrain(*box, a.zoom, os.path.dirname(os.path.abspath(__file__)))
-            (draw_terrain if a.relief else draw_coast)(ax, elev, ext)
+            if a.relief:
+                draw_terrain(ax, elev, ext)
+            else:
+                draw_coast(ax, elev, ext, show_elev=not a.no_elev)
         except Exception as e:
             print("地形の取得に失敗したため地形なしで続行:", e)
     ax.set_xlim(lon.min() - 0.15, lon.max() + 0.15)
@@ -447,6 +467,13 @@ def main():
         lax.text(2, 8, "矢印は風の吹く向き", fontsize=8, va="center", color="0.3")
         fig.canvas.draw_idle()
 
+    if not a.no_terrain and not a.no_elev and not a.relief:
+        eax = fig.add_axes([0.82, 0.16, 0.14, 0.015])
+        eax.imshow(np.linspace(0.97, 0.67, 100)[None, :].repeat(2, 0), cmap="gray", vmin=0, vmax=1,
+                   aspect="auto", extent=(0, 2500, 0, 1))
+        eax.set_yticks([]); eax.set_xticks([0, 500, 1000, 1500, 2000, 2500])
+        eax.tick_params(labelsize=7)
+        eax.set_xlabel("標高 (m)", fontsize=8)
     fig.canvas.mpl_connect("draw_event", draw_wind_legend)
     title = ax.set_title("")
 
@@ -468,9 +495,11 @@ def main():
 
     # ---- 操作部: 時刻スライダー / 再生 / 年月の選択 ----
     state = {"i": 0, "playing": False}
-    sax = plt.axes([0.15, 0.04, 0.6, 0.03])
+    sax = plt.axes([0.24, 0.04, 0.42, 0.03])
     slider = Slider(sax, "時刻", 0, len(S["times"]) - 1, valinit=0, valstep=1)
     btn = Button(plt.axes([0.80, 0.03, 0.09, 0.05]), "再生/停止")
+    b_hm = Button(plt.axes([0.09, 0.03, 0.08, 0.05]), "◀ -1時間")
+    b_hp = Button(plt.axes([0.69, 0.03, 0.08, 0.05]), "+1時間 ▶")
     b_prev = Button(plt.axes([0.15, 0.10, 0.07, 0.05]), "◀ 前月")
     tb = TextBox(plt.axes([0.30, 0.10, 0.09, 0.05]), "年月 ", initial=f"{S['start'].year}-{S['start'].month:02d}")
     b_next = Button(plt.axes([0.44, 0.10, 0.07, 0.05]), "次月 ▶")
@@ -525,6 +554,12 @@ def main():
         if state["playing"]:
             slider.set_val((state["i"] + 1) % len(S["times"]))
 
+    def hour(d):
+        state["playing"] = False
+        slider.set_val(min(max(state["i"] + d, 0), len(S["times"]) - 1))
+
+    b_hm.on_clicked(lambda e: hour(-1))
+    b_hp.on_clicked(lambda e: hour(1))
     slider.on_changed(on_slide)
     btn.on_clicked(lambda e: state.update(playing=not state["playing"]))
     anim = FuncAnimation(fig, tick, interval=a.interval, cache_frame_data=False)
