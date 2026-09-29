@@ -15,6 +15,8 @@ import io
 import math
 import os
 import re
+import ssl
+import urllib.error
 import urllib.request
 
 import matplotlib
@@ -218,18 +220,31 @@ def load_terrain(lon0, lon1, lat0, lat1, z, cache_dir):
     tx0, tx1, ty0, ty1 = int(x0), int(x1), int(y0), int(y1)
     W, H = (tx1 - tx0 + 1) * 256, (ty1 - ty0 + 1) * 256
     mosaic = np.full((H, W), np.nan)
+    # Python 3.13 は証明書の検証が厳格化され、セキュリティソフト等が挟む証明書で
+    # 「Missing Authority Key Identifier」となることがある。厳格フラグだけ外す(検証自体は行う)。
+    ctx = ssl.create_default_context()
+    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    failed = 0
     print(f"標高タイルを取得中 ({(tx1 - tx0 + 1) * (ty1 - ty0 + 1)} 枚, z={z}) ...")
     for tx in range(tx0, tx1 + 1):
         for ty in range(ty0, ty1 + 1):
             try:
-                with urllib.request.urlopen(DEM_URL.format(z=z, x=tx, y=ty), timeout=30) as r:
+                with urllib.request.urlopen(DEM_URL.format(z=z, x=tx, y=ty), timeout=30, context=ctx) as r:
                     im = np.array(Image.open(io.BytesIO(r.read())).convert("RGB")).astype(np.int64)
-            except Exception as e:  # 海上などタイルが無い場合は海扱い
-                print("  タイルなし/失敗:", tx, ty, e)
+            except urllib.error.HTTPError as e:
+                if e.code != 404:  # 404 は海上などタイル無し=海扱い
+                    failed += 1
+                    print("  取得失敗:", tx, ty, e)
+                continue
+            except Exception as e:
+                failed += 1
+                print("  取得失敗:", tx, ty, e)
                 continue
             v = im[..., 0] * 65536 + im[..., 1] * 256 + im[..., 2]
             v = np.where(v == 2 ** 23, np.nan, np.where(v > 2 ** 23, v - 2 ** 24, v) / 100.0)  # 2^23=無効
             mosaic[(ty - ty0) * 256:(ty - ty0 + 1) * 256, (tx - tx0) * 256:(tx - tx0 + 1) * 256] = v
+    if failed:
+        raise RuntimeError(f"{failed} 枚の取得に失敗しました(ネットワーク/証明書を確認)")
     # メルカトル画素 -> 緯度経度の等間隔格子に再サンプリング
     nx, ny = 900, int(900 * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
     lons = np.linspace(lon0, lon1, nx)
@@ -334,7 +349,7 @@ def main():
     sax = plt.axes([0.15, 0.04, 0.6, 0.03])
     slider = Slider(sax, "時刻", 0, len(times) - 1, valinit=0, valstep=1)
     bax = plt.axes([0.8, 0.03, 0.08, 0.05])
-    btn = Button(bax, "▶ / ⏸")
+    btn = Button(bax, "再生/停止")
 
     def on_slide(v):
         state["i"] = int(v); update(state["i"])
