@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v1.5 (変更時は VERSION 定数も更新)
+バージョン: v1.6 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -23,6 +23,7 @@ import urllib.request
 
 import matplotlib
 import matplotlib.cm
+import matplotlib.patches
 import matplotlib.colors
 import matplotlib.tri
 import matplotlib.pyplot as plt
@@ -31,7 +32,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v1.5 (等温線・等温帯の色分け)"
+VERSION = "v1.6 (等温線の平滑化・風速凡例)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -296,6 +297,7 @@ def main():
     ap.add_argument("--zoom", type=int, default=9, help="標高タイルのズーム(8-11、大きいほど細かい)")
     ap.add_argument("--tmin", type=float, help="色の下限(℃)。省略時は読み込んだ期間の最低気温")
     ap.add_argument("--tmax", type=float, help="色の上限(℃)。省略時は読み込んだ期間の最高気温")
+    ap.add_argument("--smooth", type=float, default=4.0, help="等温線の平滑化の強さ(格子数、0で無し)")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -342,6 +344,24 @@ def main():
     ax.scatter(lon, lat, s=6, c="k", zorder=2.6)
     contours = []
 
+    # 平滑化用の格子 (約0.02度刻み)
+    gx = np.linspace(lon.min() - 0.1, lon.max() + 0.1, 220)
+    gy = np.linspace(lat.min() - 0.1, lat.max() + 0.1, 200)
+    GX, GY = np.meshgrid(gx, gy)
+    kern = np.exp(-0.5 * (np.arange(-3 * 6, 3 * 6 + 1) / max(a.smooth, 0.1)) ** 2)
+    kern /= kern.sum()
+
+    def smooth(field):
+        """欠測(マスク)を無視した正規化ガウス平滑化"""
+        valid = ~np.ma.getmaskarray(field)
+        v = np.where(valid, np.ma.filled(field, 0.0), 0.0)
+        def conv(m):
+            m = np.apply_along_axis(lambda r: np.convolve(r, kern, mode="same"), 1, m)
+            return np.apply_along_axis(lambda c: np.convolve(c, kern, mode="same"), 0, m)
+        num, den = conv(v), conv(valid.astype(float))
+        out = np.ma.masked_where(~valid | (den < 1e-3), num / np.maximum(den, 1e-3))
+        return out
+
     def draw_temp(t):
         for c in contours:
             try:
@@ -355,16 +375,28 @@ def main():
             return
         try:
             tri = matplotlib.tri.Triangulation(lon[ok], lat[ok])
-            contours.append(ax.tricontourf(tri, t[ok], levels=levels, cmap=cmap, norm=norm,
-                                           extend="both", alpha=0.6, zorder=1))
-            contours.append(ax.tricontour(tri, t[ok], levels=levels, colors="k",
-                                          linewidths=0.5, alpha=0.6, zorder=2))
-        except Exception:
-            pass  # 点が一直線に並ぶ等で三角形分割できない場合は描かない
-    for n, x, y in zip(names, lon, lat):
-        ax.annotate(n, (x, y), xytext=(8, -3), textcoords="offset points", fontsize=7)
+            z = matplotlib.tri.CubicTriInterpolator(tri, t[ok], kind="min_E")(GX, GY)
+            if a.smooth > 0:
+                z = smooth(z)
+            contours.append(ax.contourf(GX, GY, z, levels=levels, cmap=cmap, norm=norm,
+                                        extend="both", alpha=0.6, zorder=1))
+            contours.append(ax.contour(GX, GY, z, levels=levels, colors="k",
+                                       linewidths=0.5, alpha=0.6, zorder=2))
+        except Exception as e:
+            print("等温線を描けませんでした:", e)
+
     q = ax.quiver(lon, lat, np.zeros(len(lon)), np.zeros(len(lon)), angles="xy",
                   scale_units="xy", scale=25, width=0.003, zorder=3)
+    # 風速の凡例 (左下)。矢印の長さ=風速 (本体の矢印と同じ縮尺)
+    xl, yl = ax.get_xlim()[0], ax.get_ylim()[0]
+    ax.add_patch(matplotlib.patches.Rectangle((xl + 0.03, yl + 0.03), 0.72, 0.40, fc="white", ec="0.5",
+                                              alpha=0.9, zorder=4))
+    ax.text(xl + 0.06, yl + 0.34, "風速の凡例", fontsize=8, zorder=6)
+    for k, v in enumerate((1, 5)):
+        y = yl + 0.24 - 0.11 * k
+        ax.quiver([xl + 0.08], [y], [v], [0], angles="xy", scale_units="xy", scale=25,
+                  width=0.003, color="k", zorder=6)
+        ax.text(xl + 0.08 + v / 25 + 0.03, y - 0.015, f"{v} m/s", fontsize=8, zorder=6)
     title = ax.set_title("")
 
     def update(i):
