@@ -1,0 +1,9 @@
+body { margin:0; padding:0; overflow:hidden; font-family:var(--vscode-font-family); color:var(--vscode-foreground); background:var(--vscode-editor-background); }
+#bar { display:flex; gap:8px; align-items:center; padding:6px 10px; height:32px; }
+#bar button, #bar select { background:var(--vscode-button-background); color:var(--vscode-button-foreground); border:none; padding:3px 10px; }
+#slider { flex:1; }
+#time { font-variant-numeric:tabular-nums; min-width:9em; }
+#map { display:block; width:100vw; height:calc(100vh - 44px); }
+#legend { position:absolute; right:12px; bottom:12px; font-size:11px; background:rgba(0,0,0,.45); color:#fff; padding:6px 8px; border-radius:4px; }
+#legend canvas { display:block; }
+#tip { position:absolute; display:none; pointer-events:none; background:rgba(0,0,0,.8); color:#fff; padding:4px 8px; border-radius:3px; font-size:12px; white-space:pre; }

@@ -1,0 +1,26 @@
+{
+  "name": "kanto-amedas",
+  "displayName": "Kanto AMeDAS Player",
+  "description": "関東平野のアメダス観測データ(気温・風向風速)を1時間ごとに再生する",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./src/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      { "command": "kantoAmedas.open", "title": "Amedas: 関東アメダスプレイヤーを開く" }
+    ],
+    "configuration": {
+      "title": "Kanto AMeDAS",
+      "properties": {
+        "kantoAmedas.dataDir": {
+          "type": "string",
+          "default": "",
+          "description": "アメダスCSVを置いたフォルダ(空欄なら拡張機能内の data/)。*.csv を全て読み込みます。"
+        }
+      }
+    }
+  },
+  "scripts": { "test": "node test/parse.test.js" }
+}
