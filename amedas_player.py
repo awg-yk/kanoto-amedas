@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.1 (変更時は VERSION 定数も更新)
+バージョン: v2.2 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -32,7 +32,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, CheckButtons, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.1 (気温・風・地点のON/OFF)"
+VERSION = "v2.2 (等高線を濃く・太く)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -308,8 +308,8 @@ def draw_coast(ax, elev, extent, show_elev=True):
         gr[land] = np.stack([g, g, g], axis=-1)[land]
         G["gray"].append(ax.imshow(gr, extent=extent, origin="upper", zorder=0, aspect="auto"))
         cs = ax.contour(lons, lats, np.nan_to_num(elev, nan=-1), levels=[200, 500, 1000, 1500, 2000],
-                        colors="0.45", linewidths=0.4, zorder=0.5)
-        G["gray"] += [cs, *cs.clabel(fmt="%dm", fontsize=6, inline=True)]
+                        colors="#5a4632", linewidths=0.9, zorder=0.5)  # 濃い茶色(黒の等温線と区別)
+        G["gray"] += [cs, *cs.clabel(fmt="%dm", fontsize=8, inline=True)]
 
     ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=2.5)
     return G
