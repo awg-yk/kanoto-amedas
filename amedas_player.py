@@ -291,6 +291,7 @@ def main():
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
 
+    print("amedas_player 版: 2025-標高SSL対策済み /", os.path.abspath(__file__))
     start = datetime.date.fromisoformat(a.start)
     end = (datetime.date.fromisoformat(a.end) if a.end else
            (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1))
