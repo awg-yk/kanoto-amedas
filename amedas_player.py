@@ -1,4 +1,6 @@
-"""関東アメダス 1時間ごと再生 (気温=色, 風向風速=矢印)
+"""関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
+
+バージョン: v1.5 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -29,6 +31,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
+VERSION = "v1.5 (等温線・等温帯の色分け)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -297,7 +300,7 @@ def main():
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
 
-    print("amedas_player 版: 2025-標高SSL対策済み /", os.path.abspath(__file__))
+    print("amedas_player", VERSION, "/", os.path.abspath(__file__))
     start = datetime.date.fromisoformat(a.start)
     end = (datetime.date.fromisoformat(a.end) if a.end else
            (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1))
@@ -370,7 +373,7 @@ def main():
         u, v = wind[i] * np.sin(ang), wind[i] * np.cos(ang)
         bad = np.isnan(u) | (wdir[i] < 0)  # 欠測・静穏は矢印なし
         q.set_UVC(np.where(bad, 0, u), np.where(bad, 0, v))
-        title.set_text(f"{times[i]}   (矢印: 風の向き, 長さ=風速)")
+        title.set_text(f"{times[i]}   (矢印: 風の向き, 長さ=風速)   [{VERSION.split()[0]}]")
         fig.canvas.draw_idle()
 
     if a.save:
