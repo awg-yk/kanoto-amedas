@@ -1,17 +1,20 @@
 """関東アメダス 1時間ごと再生 (気温=色, 風向風速=矢印)
 
 使い方:
-    python amedas_player.py                 # 既定フォルダの 時別値_*.csv を全て読み込んで再生
-    python amedas_player.py --dir "フォルダ"  # フォルダ指定
+    python amedas_player.py                                   # 2000-01 (開始日の月末まで)
+    python amedas_player.py --start 2010-07-01 --end 2010-07-31
+    python amedas_player.py --dir "フォルダ"                    # 時別値フォルダの親を指定
     python amedas_player.py --save out.gif  # 画面表示せずGIFに保存
 必要: pip install numpy matplotlib pillow(--save gif時)
 """
 import argparse
 import csv
+import datetime
 import glob
 import io
 import math
 import os
+import re
 import urllib.request
 
 import matplotlib
@@ -22,6 +25,7 @@ from matplotlib.widgets import Button, Slider
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
 PATTERN = "時別値_*.csv"
+FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
 ISLAND_LAT = 34.9  # これより南(離島)は既定で非表示
 
@@ -155,18 +159,41 @@ def parse_csv(path):
     return stations, times, np.array(temp), np.array(wind), np.array(wdir)
 
 
-def load(folder):
-    files = sorted(glob.glob(os.path.join(folder, PATTERN)))
+def find_files(folder, start, end):
+    """folder以下(サブフォルダ含む)の 時別値_開始日_終了日.csv のうち、start〜end と重なるものを返す。"""
+    out = []
+    for f in glob.glob(os.path.join(folder, "**", PATTERN), recursive=True):
+        m = FNAME_RE.search(os.path.basename(f))
+        if not m:
+            continue
+        d0, d1 = (datetime.date.fromisoformat(x) for x in m.groups())
+        if d1 >= start and d0 <= end:
+            out.append((d0, f))
+    return [f for _, f in sorted(out)]
+
+
+def load(folder, start, end):
+    files = find_files(folder, start, end)
     if not files:
-        raise SystemExit(f"CSVが見つかりません: {os.path.join(folder, PATTERN)}")
+        raise SystemExit(f"{start}〜{end} のCSVが見つかりません: {folder}\\{PATTERN}")
+    print(f"{len(files)} ファイルを読み込み中 ...")
     parts = [parse_csv(f) for f in files]
-    stations = parts[0][0]
+    stations = []  # 年によって地点数が違っても対応できるよう和集合をとる
+    for p in parts:
+        stations += [s for s in p[0] if s not in stations]
     T, TP, W, D = [], [], [], []
     for st, t, tp, w, d in parts:
         idx = [st.index(s) if s in st else -1 for s in stations]
         pick = lambda a: np.array([[a[r][k] if k >= 0 else np.nan for k in idx] for r in range(len(t))])
         T += t; TP.append(pick(tp)); W.append(pick(w)); D.append(pick(d))
-    return stations, T, np.vstack(TP), np.vstack(W), np.vstack(D)
+    TP, W, D = np.vstack(TP), np.vstack(W), np.vstack(D)
+    # 24時(翌日0:00)はその日の最終時刻として扱い、start〜end の日付で絞る
+    keep = []
+    for i, t in enumerate(T):
+        dt = datetime.datetime.strptime(t, "%Y/%m/%d %H:%M:%S") - datetime.timedelta(minutes=1)
+        if start <= dt.date() <= end:
+            keep.append(i)
+    return stations, [T[i] for i in keep], TP[keep], W[keep], D[keep]
 
 
 DEM_URL = "https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png"  # 国土地理院 標高タイル
@@ -238,7 +265,9 @@ def draw_coast(ax, elev, extent):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default=DEFAULT_DIR)
+    ap.add_argument("--dir", default=DEFAULT_DIR, help="「時別値」フォルダの親(サブフォルダも検索)")
+    ap.add_argument("--start", default="2000-01-01", help="再生開始日 YYYY-MM-DD")
+    ap.add_argument("--end", default=None, help="再生終了日 YYYY-MM-DD (省略時は開始日の月末)")
     ap.add_argument("--islands", action="store_true", help="離島も表示")
     ap.add_argument("--interval", type=int, default=500, help="1時間あたりのms")
     ap.add_argument("--no-terrain", action="store_true", help="海岸線・地形を表示しない")
@@ -247,7 +276,11 @@ def main():
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
 
-    stations, times, temp, wind, wdir = load(a.dir)
+    start = datetime.date.fromisoformat(a.start)
+    end = (datetime.date.fromisoformat(a.end) if a.end else
+           (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1))
+    stations, times, temp, wind, wdir = load(a.dir, start, end)
+    print(f"{start} 〜 {end}: {len(times)} 時刻")
     keep = [i for i, s in enumerate(stations)
             if s in COORDS and (a.islands or COORDS[s][0] >= ISLAND_LAT)]
     for s in stations:
@@ -265,7 +298,7 @@ def main():
         m = 0.15
         box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
         try:
-            elev, ext = load_terrain(*box, a.zoom, a.dir)
+            elev, ext = load_terrain(*box, a.zoom, os.path.dirname(os.path.abspath(__file__)))
             (draw_terrain if a.relief else draw_coast)(ax, elev, ext)
         except Exception as e:
             print("地形の取得に失敗したため地形なしで続行:", e)
