@@ -225,12 +225,24 @@ def draw_terrain(ax, elev, extent):
     ax.imshow(rgb, extent=extent, origin="upper", zorder=0, aspect="auto")
 
 
+def draw_coast(ax, elev, extent):
+    """標高データが無い(=海・湖)所を水色、陸を薄い色にして、境界を海岸線として描く。"""
+    land = ~np.isnan(elev)
+    rgb = np.where(land[..., None], np.array([0.95, 0.94, 0.90]), np.array([0.80, 0.88, 0.95]))
+    ax.imshow(rgb, extent=extent, origin="upper", zorder=0, aspect="auto")
+    lon0, lon1, lat0, lat1 = extent
+    lons = np.linspace(lon0, lon1, elev.shape[1])
+    lats = np.linspace(lat1, lat0, elev.shape[0])
+    ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=DEFAULT_DIR)
     ap.add_argument("--islands", action="store_true", help="離島も表示")
     ap.add_argument("--interval", type=int, default=500, help="1時間あたりのms")
-    ap.add_argument("--no-terrain", action="store_true", help="地形を表示しない")
+    ap.add_argument("--no-terrain", action="store_true", help="海岸線・地形を表示しない")
+    ap.add_argument("--relief", action="store_true", help="海岸線でなく標高の陰影図にする")
     ap.add_argument("--zoom", type=int, default=9, help="標高タイルのズーム(8-11、大きいほど細かい)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -254,7 +266,7 @@ def main():
         box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
         try:
             elev, ext = load_terrain(*box, a.zoom, a.dir)
-            draw_terrain(ax, elev, ext)
+            (draw_terrain if a.relief else draw_coast)(ax, elev, ext)
         except Exception as e:
             print("地形の取得に失敗したため地形なしで続行:", e)
     ax.set_xlim(lon.min() - 0.15, lon.max() + 0.15)
