@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.9 (変更時は VERSION 定数も更新)
+バージョン: v3.0 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -33,7 +33,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.9 (数値表示を地点名・気温・風速の3行に)"
+VERSION = "v3.0 (離島まで表示する --islands、遠い所は塗らない --reach)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -359,6 +359,8 @@ def main():
     ap.add_argument("--smooth", type=float, default=4.0, help="等温線の平滑化の強さ(格子数、0で無し)")
     ap.add_argument("--despike", type=float, default=0.0,
                     help="気温の突発的な異常値を除く。前後の時刻の平均から この値(℃)以上ずれ、前後の値どうしは近い点を欠測にする(0で無効)")
+    ap.add_argument("--reach", type=float, default=0.45,
+                    help="観測地点からこの距離(度, 約1度=100km)より遠い所は気温を塗らない(離島との間の海など)。0で無効")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -484,6 +486,12 @@ def main():
         try:
             tri = matplotlib.tri.Triangulation(lon[ok], lat[ok])
             z = matplotlib.tri.LinearTriInterpolator(tri, t[ok])(GX, GY)  # 観測値の範囲を超えない
+            if a.reach > 0:  # 最も近い観測地点から遠い格子は塗らない
+                coslat = np.cos(np.radians(lat.mean()))
+                d2 = np.full(GX.shape, np.inf)
+                for x0, y0 in zip(lon[ok], lat[ok]):
+                    d2 = np.minimum(d2, ((GX - x0) * coslat) ** 2 + (GY - y0) ** 2)
+                z = np.ma.masked_where(d2 > a.reach ** 2, z)
             if a.smooth > 0:
                 z = smooth(z)
             lv, nm = st["levels"], st["norm"]
