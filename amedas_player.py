@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.7 (変更時は VERSION 定数も更新)
+バージョン: v2.8 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -33,7 +33,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.7 (空欄地点の黒点も非表示)"
+VERSION = "v2.8 (欠測の風矢印を完全に消す・数値に風速も表示)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -496,8 +496,19 @@ def main():
             print("等温線を描けませんでした:", e)
 
     # ---- 風: 矢印 ----
-    q = ax.quiver(lon, lat, np.zeros(len(lon)), np.zeros(len(lon)), angles="xy",
-                  scale_units="xy", scale=25, width=0.003, zorder=3)
+    qh = {"q": None}  # 矢印は毎回、風が有効な地点だけで作り直す(長さ0の矢印が点として残るのを防ぐ)
+
+    def draw_wind(i):
+        if qh["q"] is not None:
+            qh["q"].remove()
+            qh["q"] = None
+        w, d = S["wind"][i], S["wdir"][i]
+        ang = np.radians(d * 22.5 + 180)  # 風が吹いていく向き
+        u, v = w * np.sin(ang), w * np.cos(ang)
+        ok = ~(np.isnan(u) | np.isnan(v) | (d < 0))  # 欠測・静穏は矢印を描かない
+        if ok.any():
+            qh["q"] = ax.quiver(lon[ok], lat[ok], u[ok], v[ok], angles="xy",
+                                scale_units="xy", scale=25, width=0.003, zorder=3)
 
     # ---- 風速の凡例: 右側(カラーバーの下)。本体の矢印と同じ長さ(ピクセル)で描く ----
     lax = fig.add_axes([0.80, 0.22, 0.19, 0.24])
@@ -521,7 +532,7 @@ def main():
             lax.quiver([8], [y], [v / 25 * px_deg], [0], angles="xy", scale_units="xy", scale=1,
                        units="dots", width=width_px, color="k")
             lax.text(8 + v / 25 * px_deg + 8, y, f"{v} m/s", fontsize=9, va="center")
-        lax.text(2, 8, "矢印は風の吹く向き", fontsize=8, va="center", color="0.3")
+        lax.text(2, 8, "矢印は風の吹く向き(静穏・欠測は矢印なし)", fontsize=8, va="center", color="0.3")
         fig.canvas.draw_idle()
 
     if bg["gray"] and not a.relief:
@@ -541,7 +552,8 @@ def main():
         rgba[:, 3] = np.where(missing, 0.0, 1.0)  # 観測値が空欄の地点は黒点も消す
         dots.set_facecolor(rgba)
         dots.set_edgecolor(rgba)
-        q.set_visible(show["wind"])
+        if qh["q"] is not None:
+            qh["q"].set_visible(show["wind"])
         lax.set_visible(show["wind"])
         cax.set_visible(show["temp"])
 
@@ -550,15 +562,19 @@ def main():
 
     def update(i):
         draw_temp(S["temp"][i])
-        w, d = S["wind"][i], S["wdir"][i]
-        ang = np.radians(d * 22.5 + 180)  # 風が吹いていく向き
-        u, v = w * np.sin(ang), w * np.cos(ang)
-        bad = np.isnan(u) | (d < 0)  # 欠測・静穏は矢印なし
-        q.set_UVC(np.where(bad, 0, u), np.where(bad, 0, v))
+        draw_wind(i)
         missing[:] = np.isnan(S["temp"][i]) & np.isnan(S["wind"][i])
         for k, (n, art) in enumerate(zip(names, name_arts)):  # 「数値」ON: 観測気温を地点名に併記
-            tv = S["temp"][i][k]
-            art.set_text(f"{n} {tv:.1f}" if show["val"] and not np.isnan(tv) else n)
+            tv, wv = S["temp"][i][k], S["wind"][i][k]
+            if show["val"]:  # 「数値」ON: 観測気温と風速を地点名の下に併記
+                vals = []
+                if not np.isnan(tv):
+                    vals.append(f"{tv:.1f}℃")
+                if not np.isnan(wv):
+                    vals.append(f"{wv:g}m/s")
+                art.set_text(n + ("\n" + " ".join(vals) if vals else ""))
+            else:
+                art.set_text(n)
         apply_view()
         title.set_text(f"{S['times'][i]}   [{VERSION.split()[0]}]")
         fig.canvas.draw_idle()
