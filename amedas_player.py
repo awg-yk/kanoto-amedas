@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.4 (変更時は VERSION 定数も更新)
+バージョン: v2.5 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -32,7 +32,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, CheckButtons, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.4 (異常値除外オプション・CSV読込の頑健化)"
+VERSION = "v2.5 (開始月をフォルダ内の最古ファイルから自動選択)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -345,7 +345,7 @@ def month_range(y, m):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=DEFAULT_DIR, help="「時別値」フォルダの親(サブフォルダも検索)")
-    ap.add_argument("--start", default="2000-01-01", help="再生開始日 YYYY-MM-DD")
+    ap.add_argument("--start", default=None, help="再生開始日 YYYY-MM-DD (省略時はフォルダ内で最も古いファイルの開始日)")
     ap.add_argument("--end", default=None, help="再生終了日 YYYY-MM-DD (省略時は開始日の月末)")
     ap.add_argument("--islands", action="store_true", help="離島も表示")
     ap.add_argument("--interval", type=int, default=500, help="1時間あたりのms")
@@ -363,7 +363,16 @@ def main():
     a = ap.parse_args()
 
     print("amedas_player", VERSION, "/", os.path.abspath(__file__))
-    start = datetime.date.fromisoformat(a.start)
+    if a.start:
+        start = datetime.date.fromisoformat(a.start)
+    else:
+        firsts = [FNAME_RE.search(os.path.basename(f)) for f in
+                  glob.glob(os.path.join(a.dir, "**", PATTERN), recursive=True)]
+        firsts = [datetime.date.fromisoformat(m.group(1)) for m in firsts if m]
+        if not firsts:
+            raise SystemExit(f"CSVが見つかりません: {os.path.join(a.dir, '**', PATTERN)}")
+        start = min(firsts)
+        print("開始日を最も古いファイルに合わせました:", start)
     end = (datetime.date.fromisoformat(a.end) if a.end else month_range(start.year, start.month)[1])
 
     # 表示する地点は座標表(COORDS)で固定し、CSV側に無い地点は欠測(NaN)にする。
