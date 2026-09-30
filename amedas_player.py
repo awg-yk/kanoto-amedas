@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.2 (変更時は VERSION 定数も更新)
+バージョン: v2.3 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -32,7 +32,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, CheckButtons, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.2 (等高線を濃く・太く)"
+VERSION = "v2.3 (線形補間・数値表示)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -387,10 +387,12 @@ def main():
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
     # 表示のON/OFF (画面下のチェックボックス)。気温・風をOFFにすると標高(灰色)だけ見える。
-    show = {"temp": True, "wind": True, "pts": True}
+    show = {"temp": True, "wind": True, "pts": True, "val": False}
     pts_arts = [ax.scatter(lon, lat, s=6, c="k", zorder=2.6)]
+    name_arts = []
     for n, x, y in zip(names, lon, lat):
-        pts_arts.append(ax.annotate(n, (x, y), xytext=(8, -3), textcoords="offset points", fontsize=7))
+        name_arts.append(ax.annotate(n, (x, y), xytext=(8, -3), textcoords="offset points", fontsize=7))
+    pts_arts += name_arts
 
     # ---- 気温: 補間した等温線(線+数値)と等温帯(色)。右側に凡例 ----
     cmap = plt.get_cmap("RdYlBu_r")
@@ -445,7 +447,7 @@ def main():
             return
         try:
             tri = matplotlib.tri.Triangulation(lon[ok], lat[ok])
-            z = matplotlib.tri.CubicTriInterpolator(tri, t[ok], kind="min_E")(GX, GY)
+            z = matplotlib.tri.LinearTriInterpolator(tri, t[ok])(GX, GY)  # 観測値の範囲を超えない
             if a.smooth > 0:
                 z = smooth(z)
             lv, nm = st["levels"], st["norm"]
@@ -511,6 +513,9 @@ def main():
         u, v = w * np.sin(ang), w * np.cos(ang)
         bad = np.isnan(u) | (d < 0)  # 欠測・静穏は矢印なし
         q.set_UVC(np.where(bad, 0, u), np.where(bad, 0, v))
+        for k, (n, art) in enumerate(zip(names, name_arts)):  # 「数値」ON: 観測気温を地点名に併記
+            tv = S["temp"][i][k]
+            art.set_text(f"{n} {tv:.1f}" if show["val"] and not np.isnan(tv) else n)
         apply_view()
         title.set_text(f"{S['times'][i]}   [{VERSION.split()[0]}]")
         fig.canvas.draw_idle()
@@ -534,8 +539,9 @@ def main():
     b_y = Button(plt.axes([0.55, 0.10, 0.06, 0.05]), "-1年")
     b_y2 = Button(plt.axes([0.62, 0.10, 0.06, 0.05]), "+1年")
     msg = fig.text(0.15, 0.165, "", fontsize=9, color="crimson")
-    chk = CheckButtons(plt.axes([0.72, 0.075, 0.07, 0.11]), ["気温", "風", "地点"], [True, True, True])
-    chk_keys = {"気温": "temp", "風": "wind", "地点": "pts"}
+    chk_ax = plt.axes([0.715, 0.10, 0.075, 0.12])
+    chk = CheckButtons(chk_ax, ["気温", "風", "地点", "数値"], [True, True, True, False])
+    chk_keys = {"気温": "temp", "風": "wind", "地点": "pts", "数値": "val"}
 
     def on_check(label):
         show[chk_keys[label]] = not show[chk_keys[label]]
