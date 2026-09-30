@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.8 (変更時は VERSION 定数も更新)
+バージョン: v2.9 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -33,7 +33,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.8 (欠測の風矢印を完全に消す・数値に風速も表示)"
+VERSION = "v2.9 (数値表示を地点名・気温・風速の3行に)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -566,13 +566,13 @@ def main():
         missing[:] = np.isnan(S["temp"][i]) & np.isnan(S["wind"][i])
         for k, (n, art) in enumerate(zip(names, name_arts)):  # 「数値」ON: 観測気温を地点名に併記
             tv, wv = S["temp"][i][k], S["wind"][i][k]
-            if show["val"]:  # 「数値」ON: 観測気温と風速を地点名の下に併記
+            if show["val"]:  # 「数値」ON: 地点名の下に気温、その下に風速を改行して併記
                 vals = []
                 if not np.isnan(tv):
                     vals.append(f"{tv:.1f}℃")
                 if not np.isnan(wv):
                     vals.append(f"{wv:g}m/s")
-                art.set_text(n + ("\n" + " ".join(vals) if vals else ""))
+                art.set_text("\n".join([n] + vals))  # 地点名 / 気温 / 風速 の3行
             else:
                 art.set_text(n)
         apply_view()
