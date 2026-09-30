@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.5 (変更時は VERSION 定数も更新)
+バージョン: v2.6 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -10,6 +10,7 @@
 必要: pip install numpy matplotlib pillow(--save gif時)
 """
 import argparse
+import calendar
 import csv
 import datetime
 import glob
@@ -29,10 +30,10 @@ import matplotlib.tri
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Button, CheckButtons, Slider, TextBox
+from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.5 (開始月をフォルダ内の最古ファイルから自動選択)"
+VERSION = "v2.6 (時間・日・月・年の移動ボタン、☑表示、空欄地点名の非表示)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -426,7 +427,7 @@ def main():
     name_arts = []
     for n, x, y in zip(names, lon, lat):
         name_arts.append(ax.annotate(n, (x, y), xytext=(8, -3), textcoords="offset points", fontsize=7))
-    pts_arts += name_arts
+    missing = np.zeros(len(names), bool)  # 気温も風も空欄の地点(地点名を出さない)
 
     # ---- 気温: 補間した等温線(線+数値)と等温帯(色)。右側に凡例 ----
     cmap = plt.get_cmap("RdYlBu_r")
@@ -533,6 +534,8 @@ def main():
     def apply_view():
         """チェックボックスの状態を表示に反映する"""
         set_visible(pts_arts, show["pts"])
+        for k, art in enumerate(name_arts):
+            art.set_visible(show["pts"] and not missing[k])
         q.set_visible(show["wind"])
         lax.set_visible(show["wind"])
         cax.set_visible(show["temp"])
@@ -547,6 +550,7 @@ def main():
         u, v = w * np.sin(ang), w * np.cos(ang)
         bad = np.isnan(u) | (d < 0)  # 欠測・静穏は矢印なし
         q.set_UVC(np.where(bad, 0, u), np.where(bad, 0, v))
+        missing[:] = np.isnan(S["temp"][i]) & np.isnan(S["wind"][i])
         for k, (n, art) in enumerate(zip(names, name_arts)):  # 「数値」ON: 観測気温を地点名に併記
             tv = S["temp"][i][k]
             art.set_text(f"{n} {tv:.1f}" if show["val"] and not np.isnan(tv) else n)
@@ -560,31 +564,46 @@ def main():
         print("保存:", a.save)
         return
 
-    # ---- 操作部: 時刻スライダー / 再生 / 年月の選択 ----
+    # ---- 操作部 ----
+    # 下段: [-1年 -1月 -1日 -1時間] 時刻スライダー [+1時間 +1日 +1月 +1年] 再生/停止
     state = {"i": 0, "playing": False}
-    sax = plt.axes([0.24, 0.04, 0.42, 0.03])
-    slider = Slider(sax, "時刻", 0, len(S["times"]) - 1, valinit=0, valstep=1)
-    btn = Button(plt.axes([0.80, 0.03, 0.09, 0.05]), "再生/停止")
-    b_hm = Button(plt.axes([0.09, 0.03, 0.08, 0.05]), "◀ -1時間")
-    b_hp = Button(plt.axes([0.69, 0.03, 0.08, 0.05]), "+1時間 ▶")
-    b_prev = Button(plt.axes([0.15, 0.10, 0.07, 0.05]), "◀ 前月")
+    slider = Slider(plt.axes([0.26, 0.04, 0.29, 0.03]), "時刻", 0, len(S["times"]) - 1, valinit=0, valstep=1)
+    btn = Button(plt.axes([0.81, 0.03, 0.09, 0.05]), "再生/停止")
+    steps = [("年", 0.010, -12), ("月", 0.062, -1), ("日", 0.114, -24), ("時間", 0.166, -1),
+             ("時間", 0.585, 1), ("日", 0.637, 24), ("月", 0.689, 1), ("年", 0.741, 12)]
+    step_btns = []
+    for unit, x0, d in steps:
+        bt = Button(plt.axes([x0, 0.03, 0.05, 0.05]), f"{'+' if d > 0 else '-'}1{unit}")
+        bt.label.set_fontsize(8)
+        step_btns.append((bt, unit, d))
     tb = TextBox(plt.axes([0.30, 0.10, 0.09, 0.05]), "年月 ", initial=f"{S['start'].year}-{S['start'].month:02d}")
-    b_next = Button(plt.axes([0.44, 0.10, 0.07, 0.05]), "次月 ▶")
-    b_y = Button(plt.axes([0.55, 0.10, 0.06, 0.05]), "-1年")
-    b_y2 = Button(plt.axes([0.62, 0.10, 0.06, 0.05]), "+1年")
     msg = fig.text(0.15, 0.165, "", fontsize=9, color="crimson")
-    chk_ax = plt.axes([0.715, 0.10, 0.075, 0.12])
-    chk = CheckButtons(chk_ax, ["気温", "風", "地点", "数値"], [True, True, True, False])
-    chk_keys = {"気温": "temp", "風": "wind", "地点": "pts", "数値": "val"}
 
-    def on_check(label):
-        show[chk_keys[label]] = not show[chk_keys[label]]
-        update(state["i"])
+    # 表示のON/OFF: ☑/☐ のトグルボタン (CheckButtonsの×印の代わり)
+    toggles = {}
+    for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"))):
+        tg = Button(plt.axes([0.715, 0.185 - 0.03 * k, 0.085, 0.026]), "", color="white", hovercolor="0.92")
+        tg.label.set_fontsize(10)
+        toggles[key] = (tg, label)
 
-    chk.on_clicked(on_check)
+    def refresh_toggle(key):
+        tg, label = toggles[key]
+        tg.label.set_text(("☑ " if show[key] else "☐ ") + label)
 
-    def load_month(y, m):
-        """指定の年月を読み込んで表示を切り替える。CSVが無い場合は元の表示のまま。"""
+    def make_toggle_cb(key):
+        def cb(_):
+            show[key] = not show[key]
+            refresh_toggle(key)
+            update(state["i"])
+        return cb
+
+    for key in toggles:
+        refresh_toggle(key)
+        toggles[key][0].on_clicked(make_toggle_cb(key))
+
+    def load_month(y, m, target=None):
+        """指定の年月を読み込んで表示を切り替える。CSVが無い場合は元の表示のまま。
+        target(日時)があれば、その時刻に最も近いコマを表示する。"""
         try:
             d0, d1 = month_range(y, m)
         except ValueError:
@@ -593,21 +612,44 @@ def main():
         old = dict(S)
         try:
             read(d0, d1)
-        except FileNotFoundError as e:
+        except FileNotFoundError:
             S.update(old); msg.set_text(f"{y}-{m:02d} のCSVがありません"); fig.canvas.draw_idle(); return
         msg.set_text("")
         state["playing"] = False
         slider.valmax = len(S["times"]) - 1
         slider.ax.set_xlim(slider.valmin, slider.valmax)
-        state["i"] = 0
-        slider.set_val(0)
+        state["i"] = nearest_index(target) if target else 0
+        slider.set_val(state["i"])
         tb.set_val(f"{y}-{m:02d}")
-        update(0)
+        update(state["i"])
 
-    def shift(months):
-        d = S["start"]
-        k = d.year * 12 + d.month - 1 + months
-        load_month(k // 12, k % 12 + 1)
+    def nearest_index(dt):
+        ts = [parse_time(t) for t in S["times"]]
+        return int(np.argmin([abs((t - dt).total_seconds()) for t in ts]))
+
+    def current_time():
+        return parse_time(S["times"][state["i"]])
+
+    def go_to(dt):
+        """dt へ移動。読み込み済みの月の外なら、その月のCSVを読み込む。"""
+        if S["start"] <= dt.date() <= S["end"]:
+            state["playing"] = False
+            slider.set_val(nearest_index(dt))
+        else:
+            load_month(dt.year, dt.month, target=dt)
+
+    def move(unit, d):
+        cur = current_time()
+        if unit in ("年", "月"):  # 同じ日・時刻のまま月/年を動かす(月末は日を詰める)
+            k = cur.year * 12 + cur.month - 1 + (d if unit == "月" else d)
+            y, m = k // 12, k % 12 + 1
+            day = min(cur.day, calendar.monthrange(y, m)[1])
+            go_to(cur.replace(year=y, month=m, day=day))
+        else:
+            go_to(cur + datetime.timedelta(hours=d))
+
+    for bt, unit, d in step_btns:
+        bt.on_clicked(lambda e, unit=unit, d=d: move(unit, d))
 
     def on_submit(text):
         try:
@@ -617,10 +659,6 @@ def main():
         if (y, m) != (S["start"].year, S["start"].month):
             load_month(y, m)
 
-    b_prev.on_clicked(lambda e: shift(-1))
-    b_next.on_clicked(lambda e: shift(1))
-    b_y.on_clicked(lambda e: shift(-12))
-    b_y2.on_clicked(lambda e: shift(12))
     tb.on_submit(on_submit)
 
     def on_slide(v):
@@ -630,12 +668,6 @@ def main():
         if state["playing"]:
             slider.set_val((state["i"] + 1) % len(S["times"]))
 
-    def hour(d):
-        state["playing"] = False
-        slider.set_val(min(max(state["i"] + d, 0), len(S["times"]) - 1))
-
-    b_hm.on_clicked(lambda e: hour(-1))
-    b_hp.on_clicked(lambda e: hour(1))
     slider.on_changed(on_slide)
     btn.on_clicked(lambda e: state.update(playing=not state["playing"]))
     anim = FuncAnimation(fig, tick, interval=a.interval, cache_frame_data=False)
