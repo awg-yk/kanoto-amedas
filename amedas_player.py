@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.6 (変更時は VERSION 定数も更新)
+バージョン: v2.7 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -33,7 +33,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.6 (時間・日・月・年の移動ボタン、☑表示、空欄地点名の非表示)"
+VERSION = "v2.7 (空欄地点の黒点も非表示)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -423,7 +423,8 @@ def main():
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
     # 表示のON/OFF (画面下のチェックボックス)。気温・風をOFFにすると標高(灰色)だけ見える。
     show = {"temp": True, "wind": True, "pts": True, "val": False}
-    pts_arts = [ax.scatter(lon, lat, s=6, c="k", zorder=2.6)]
+    dots = ax.scatter(lon, lat, s=6, c="k", zorder=2.6)
+    pts_arts = [dots]
     name_arts = []
     for n, x, y in zip(names, lon, lat):
         name_arts.append(ax.annotate(n, (x, y), xytext=(8, -3), textcoords="offset points", fontsize=7))
@@ -536,6 +537,10 @@ def main():
         set_visible(pts_arts, show["pts"])
         for k, art in enumerate(name_arts):
             art.set_visible(show["pts"] and not missing[k])
+        rgba = np.zeros((len(names), 4))
+        rgba[:, 3] = np.where(missing, 0.0, 1.0)  # 観測値が空欄の地点は黒点も消す
+        dots.set_facecolor(rgba)
+        dots.set_edgecolor(rgba)
         q.set_visible(show["wind"])
         lax.set_visible(show["wind"])
         cax.set_visible(show["temp"])
