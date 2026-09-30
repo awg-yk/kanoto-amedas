@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v2.3 (変更時は VERSION 定数も更新)
+バージョン: v2.4 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -32,7 +32,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, CheckButtons, Slider, TextBox
 
 DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v2.3 (線形補間・数値表示)"
+VERSION = "v2.4 (異常値除外オプション・CSV読込の頑健化)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -146,7 +146,7 @@ def parse_csv(path):
     """気象庁形式CSV。1地点8列: 気温,品質,均質,風速,品質,風向,品質,均質"""
     with open(path, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.reader(f))
-    name_row = next(i for i, r in enumerate(rows) if r and r[0] == "" and len(r) > 8)
+    name_row = next(i for i, r in enumerate(rows) if len(r) > 8 and r[0] == "" and r[1] != "")  # 地点名の行(空行は飛ばす)
     names = rows[name_row]
     starts, stations = [], []
     for i in range(1, len(names)):
@@ -166,6 +166,16 @@ def parse_csv(path):
             d.append(-1 if v == "静穏" else (DIRS.index(v) if v in DIRS else np.nan))
         wdir.append(d)
     return stations, times, np.array(temp), np.array(wind), np.array(wdir)
+
+
+def parse_time(t):
+    """'2000/1/7 12:00:00' でも '2000/1/7 12:00'(Excelで保存し直したCSV)でも読めるようにする"""
+    for f in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+        try:
+            return datetime.datetime.strptime(t, f)
+        except ValueError:
+            pass
+    raise ValueError(f"時刻を解釈できません: {t}")
 
 
 def find_files(folder, start, end):
@@ -196,12 +206,11 @@ def load(folder, start, end):
         pick = lambda a: np.array([[a[r][k] if k >= 0 else np.nan for k in idx] for r in range(len(t))])
         T += t; TP.append(pick(tp)); W.append(pick(w)); D.append(pick(d))
     TP, W, D = np.vstack(TP), np.vstack(W), np.vstack(D)
-    # 24時(翌日0:00)はその日の最終時刻として扱い、start〜end の日付で絞る
-    keep = []
-    for i, t in enumerate(T):
-        dt = datetime.datetime.strptime(t, "%Y/%m/%d %H:%M:%S") - datetime.timedelta(minutes=1)
-        if start <= dt.date() <= end:
-            keep.append(i)
+    # start 0:00 〜 end翌日0:00 を含めて絞る。CSVが「1:00〜24:00(翌0:00)」形式でも
+    # 「0:00〜23:00」形式でも、その日のデータを取りこぼさない。
+    lo = datetime.datetime.combine(start, datetime.time(0, 0))
+    hi = datetime.datetime.combine(end + datetime.timedelta(days=1), datetime.time(0, 0))
+    keep = [i for i, t in enumerate(T) if lo <= parse_time(t) <= hi]
     return stations, [T[i] for i in keep], TP[keep], W[keep], D[keep]
 
 
@@ -315,6 +324,18 @@ def draw_coast(ax, elev, extent, show_elev=True):
     return G
 
 
+def despike(temp, thr, stations, times):
+    """1時間だけ前後から大きく外れた気温(前の時刻と次の時刻は近い)を欠測(NaN)にする"""
+    out = temp.copy()
+    prev, mid, nxt = temp[:-2], temp[1:-1], temp[2:]
+    with np.errstate(invalid="ignore"):
+        bad = (np.abs(mid - (prev + nxt) / 2) > thr) & (np.abs(prev - nxt) <= thr / 2)
+    for h, k in zip(*np.where(bad)):
+        print(f"  異常値として除外: {times[h + 1]} {stations[k]} {temp[h + 1, k]}℃ (前後 {temp[h, k]}, {temp[h + 2, k]})")
+    out[1:-1][bad] = np.nan
+    return out
+
+
 def month_range(y, m):
     first = datetime.date(y, m, 1)
     last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
@@ -335,6 +356,8 @@ def main():
     ap.add_argument("--tmin", type=float, help="色の下限(℃)。省略時は -15")
     ap.add_argument("--tmax", type=float, help="色の上限(℃)。省略時は 40")
     ap.add_argument("--smooth", type=float, default=4.0, help="等温線の平滑化の強さ(格子数、0で無し)")
+    ap.add_argument("--despike", type=float, default=0.0,
+                    help="気温の突発的な異常値を除く。前後の時刻の平均から この値(℃)以上ずれ、前後の値どうしは近い点を欠測にする(0で無効)")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -357,6 +380,8 @@ def main():
         for st in stations:
             if st not in COORDS:
                 print("座標未登録(スキップ):", st)
+        if a.despike > 0:
+            temp = despike(temp, a.despike, stations, times)
         idx = [stations.index(n) if n in stations else -1 for n in names]
         pick = lambda arr: np.stack([arr[:, k] if k >= 0 else np.full(len(times), np.nan) for k in idx], axis=1)
         S.update(times=times, temp=pick(temp), wind=pick(wind), wdir=pick(wdir), start=d0, end=d1)
