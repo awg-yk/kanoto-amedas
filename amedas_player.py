@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.1 (変更時は VERSION 定数も更新)
+バージョン: v3.2 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -32,8 +32,8 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
-DEFAULT_DIR = r"C:\Users\山口　孝介\Desktop\ALL\02 自分の研究\風変わり\関東のアメダス"
-VERSION = "v3.1 (地点座標を気象庁の観測所一覧の値に更新)"
+DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
+VERSION = "v3.2 (既定フォルダをスクリプトの場所に変更)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
