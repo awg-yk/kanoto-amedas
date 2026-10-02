@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.6 (変更時は VERSION 定数も更新)
+バージョン: v3.7 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -15,6 +15,7 @@ import csv
 import datetime
 import glob
 import io
+import json
 import math
 import os
 import re
@@ -33,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.6 (未登録地点の記入用CSV・同名地点の選択)"
+VERSION = "v3.7 (全国の観測所一覧 stations.json に対応)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -371,7 +372,29 @@ def load_station_table(folders):
     """「観測所一覧*.csv」(列: 地点名, 緯度, 経度, 標高(m), 都道府県 など)があれば読み込む。
     他の地域のデータを足すときは、この表に行を足すだけで座標が使える。"""
     seen = set()
-    for folder in folders:
+    for folder in folders:  # 全国の観測所一覧(stations.json: 現役 stations と廃止 discontinuedStations)
+        for f in (glob.glob(os.path.join(folder, "stations.json")) + glob.glob(os.path.join(folder, "観測所一覧*.json"))
+                  + glob.glob(os.path.join(folder, "data", "stations_all.json"))):
+            f = os.path.abspath(f)
+            if f in seen:
+                continue
+            seen.add(f)
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    js = json.load(fh)
+                items = (js.get("stations", []) + js.get("discontinuedStations", [])) if isinstance(js, dict) else []
+            except (ValueError, OSError):
+                continue
+            n = 0
+            for it in items:
+                try:
+                    TABLE.setdefault(it["name"].strip(), []).append(
+                        (float(it["lat"]), float(it["lon"]), int(it.get("alt") or 0), it.get("prefecture", "")))
+                    n += 1
+                except (KeyError, ValueError, TypeError, AttributeError):
+                    continue
+            if n:
+                print(f"観測所一覧: {n} 地点を読み込み ({os.path.basename(f)})")
         for f in glob.glob(os.path.join(folder, "**", "観測所一覧*.csv"), recursive=True):
             f = os.path.abspath(f)
             if f in seen:
