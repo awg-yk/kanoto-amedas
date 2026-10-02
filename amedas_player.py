@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.4 (変更時は VERSION 定数も更新)
+バージョン: v3.5 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -33,11 +33,11 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.4 (日のプルダウン)"
+VERSION = "v3.5 (関東以外のデータ・観測所一覧に対応)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
-ISLAND_LAT = 34.9  # これより南(離島)は既定で非表示
+ISLANDS = {"大島", "大島北ノ山", "新島", "神津島", "三宅島", "三宅坪田", "八重見ヶ原", "八丈島"}  # --islands を付けたときだけ表示
 
 for _f in ("Yu Gothic", "Meiryo", "MS Gothic", "IPAexGothic", "Noto Sans CJK JP"):
     matplotlib.rcParams["font.family"] = [_f, "sans-serif"]
@@ -213,21 +213,32 @@ def load(folder, start, end):
         raise FileNotFoundError(f"{start}〜{end} のCSVが見つかりません: {folder}\\{PATTERN}")
     print(f"{len(files)} ファイルを読み込み中 ...")
     parts = [parse_csv(f) for f in files]
-    stations = []  # 年によって地点数が違っても対応できるよう和集合をとる
+    stations = []  # 年や地域によって地点が違っても対応できるよう和集合をとる
     for p in parts:
         stations += [s for s in p[0] if s not in stations]
-    T, TP, W, D = [], [], [], []
-    for st, t, tp, w, d in parts:
-        idx = [st.index(s) if s in st else -1 for s in stations]
-        pick = lambda a: np.array([[a[r][k] if k >= 0 else np.nan for k in idx] for r in range(len(t))])
-        T += t; TP.append(pick(tp)); W.append(pick(w)); D.append(pick(d))
-    TP, W, D = np.vstack(TP), np.vstack(W), np.vstack(D)
+    col = {s: k for k, s in enumerate(stations)}
     # start 0:00 〜 end翌日0:00 を含めて絞る。CSVが「1:00〜24:00(翌0:00)」形式でも
     # 「0:00〜23:00」形式でも、その日のデータを取りこぼさない。
     lo = datetime.datetime.combine(start, datetime.time(0, 0))
     hi = datetime.datetime.combine(end + datetime.timedelta(days=1), datetime.time(0, 0))
-    keep = [i for i, t in enumerate(T) if lo <= parse_time(t) <= hi]
-    return stations, [T[i] for i in keep], TP[keep], W[keep], D[keep]
+    rows = {}  # 時刻 -> [気温, 風速, 風向] (地点ごとの配列)。同じ時刻は複数ファイルの値を合体する
+    for st, t, tp, w, d in parts:
+        cols = [col[s] for s in st]
+        for r, ts in enumerate(t):
+            dt = parse_time(ts)
+            if not (lo <= dt <= hi):
+                continue
+            if dt not in rows:
+                rows[dt] = [np.full(len(stations), np.nan) for _ in range(3)] + [ts]
+            for k, src in enumerate((tp, w, d)):
+                vals = src[r]
+                ok = ~np.isnan(vals)
+                rows[dt][k][np.array(cols)[ok]] = vals[ok]
+    order = sorted(rows)
+    TP = np.array([rows[k][0] for k in order]).reshape(len(order), len(stations))
+    W = np.array([rows[k][1] for k in order]).reshape(len(order), len(stations))
+    D = np.array([rows[k][2] for k in order]).reshape(len(order), len(stations))
+    return stations, [rows[k][3] for k in order], TP, W, D
 
 
 DEM_URL = "https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png"  # 国土地理院 標高タイル
@@ -278,7 +289,8 @@ def load_terrain(lon0, lon1, lat0, lat1, z, cache_dir):
     if failed:
         raise RuntimeError(f"{failed} 枚の取得に失敗しました(ネットワーク/証明書を確認)")
     # メルカトル画素 -> 緯度経度の等間隔格子に再サンプリング
-    nx, ny = 900, int(900 * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
+    nx = int(min(3000, max(900, (lon1 - lon0) * 350)))  # 約0.003度刻み(広域は上限3000)
+    ny = int(nx * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
     lons = np.linspace(lon0, lon1, nx)
     lats = np.linspace(lat1, lat0, ny)
     px = np.clip(((lons + 180) / 360 * 2 ** z - tx0) * 256, 0, W - 1).astype(int)
@@ -352,6 +364,58 @@ def despike(temp, thr, stations, times):
     return out
 
 
+TABLE = {}  # 観測所一覧CSVの地点名 -> [(緯度, 経度, 標高, 都道府県), ...]
+
+
+def load_station_table(folders):
+    """「観測所一覧*.csv」(列: 地点名, 緯度, 経度, 標高(m), 都道府県 など)があれば読み込む。
+    他の地域のデータを足すときは、この表に行を足すだけで座標が使える。"""
+    seen = set()
+    for folder in folders:
+        for f in glob.glob(os.path.join(folder, "**", "観測所一覧*.csv"), recursive=True):
+            f = os.path.abspath(f)
+            if f in seen:
+                continue
+            seen.add(f)
+            for enc in ("utf-8-sig", "cp932"):
+                try:
+                    with open(f, encoding=enc, newline="") as fh:
+                        rows = list(csv.reader(fh))
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                continue
+            head = rows[0]
+            find = lambda key: next((i for i, h in enumerate(head) if h.startswith(key)), None)
+            ci, cla, clo, cel, cpr = find("地点名"), find("緯度"), find("経度"), find("標高"), find("都道府県")
+            if None in (ci, cla, clo):
+                print("観測所一覧の列が見つかりません(地点名/緯度/経度):", f)
+                continue
+            n = 0
+            for r in rows[1:]:
+                try:
+                    TABLE.setdefault(r[ci].strip(), []).append(
+                        (float(r[cla]), float(r[clo]), int(float(r[cel])) if cel is not None and r[cel] else 0,
+                         r[cpr] if cpr is not None else ""))
+                    n += 1
+                except (ValueError, IndexError):
+                    continue
+            print(f"観測所一覧: {n} 地点を読み込み ({os.path.basename(f)})")
+
+
+def resolve_coord(name):
+    """CSVの地点名から座標を探す。「つくば（館野）」のような括弧付きは括弧を除いた名前でも探す。"""
+    base = re.sub(r"[（(].*?[）)]", "", name).strip()
+    for key in (name, base):
+        if key in TABLE:
+            c = TABLE[key]
+            if len(c) > 1:
+                print(f"  同名の地点が複数あります({key}): {c[0][3]} を使います。違う場合は観測所一覧を調整してください")
+            return c[0][:3]
+    return None
+
+
 def month_range(y, m):
     first = datetime.date(y, m, 1)
     last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
@@ -395,13 +459,27 @@ def main():
 
     # 表示する地点は座標表(COORDS)で固定し、CSV側に無い地点は欠測(NaN)にする。
     # これで年月を切り替えても地点・地図の枠は変わらない。
-    names = [n for n in COORDS if a.islands or COORDS[n][0] >= ISLAND_LAT]
+    load_station_table([a.dir, os.path.dirname(os.path.abspath(__file__))])
+    try:
+        first = load(a.dir, start, end)
+    except FileNotFoundError as e:
+        raise SystemExit(str(e))
+    for st_name in first[0]:  # 組み込みの関東の座標に無い地点(他の地域)は、観測所一覧から探す
+        if st_name not in COORDS:
+            c = resolve_coord(st_name)
+            if c:
+                COORDS[st_name] = c
+            else:
+                print("座標未登録(スキップ):", st_name, "← 観測所一覧に地点名と緯度・経度を足してください")
+    names = [n for n in COORDS if a.islands or n not in ISLANDS]
     lat = np.array([COORDS[n][0] for n in names])
     lon = np.array([COORDS[n][1] for n in names])
+    first_used = {}
     S = {}  # 現在表示中のデータ: times, temp, wind, wdir
 
     def read(d0, d1):
-        stations, times, temp, wind, wdir = load(a.dir, d0, d1)
+        stations, times, temp, wind, wdir = first if (d0, d1) == (start, end) and "used" not in first_used else load(a.dir, d0, d1)
+        first_used["used"] = True
         if not times:
             raise FileNotFoundError(f"{d0}〜{d1} のデータ行がありません")
         for st in stations:
@@ -426,7 +504,16 @@ def main():
         m = 0.15
         box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
         try:
-            elev, ext = load_terrain(*box, a.zoom, os.path.dirname(os.path.abspath(__file__)))
+            z = a.zoom
+            while z > 4:  # 広域ではタイルが多すぎるので、60枚以下になるまでズームを下げる
+                x0, y1 = _tile_xy(box[0], box[2], z)
+                x1, y0 = _tile_xy(box[1], box[3], z)
+                if (int(x1) - int(x0) + 1) * (int(y1) - int(y0) + 1) <= 60:
+                    break
+                z -= 1
+            if z != a.zoom:
+                print(f"範囲が広いので標高タイルのズームを {a.zoom} → {z} に下げました")
+            elev, ext = load_terrain(*box, z, os.path.dirname(os.path.abspath(__file__)))
             if a.relief:
                 draw_terrain(ax, elev, ext)
             else:
@@ -460,10 +547,13 @@ def main():
     contours, labels = [], []
 
     # 平滑化用の格子 (約0.02度刻み)
-    gx = np.linspace(lon.min() - 0.1, lon.max() + 0.1, 220)
-    gy = np.linspace(lat.min() - 0.1, lat.max() + 0.1, 200)
+    gstep = max(0.0125, max(lon.max() - lon.min(), lat.max() - lat.min()) / 700)  # 度/格子
+    gx = np.linspace(lon.min() - 0.1, lon.max() + 0.1, int((lon.max() - lon.min() + 0.2) / gstep) + 1)
+    gy = np.linspace(lat.min() - 0.1, lat.max() + 0.1, int((lat.max() - lat.min() + 0.2) / gstep) + 1)
     GX, GY = np.meshgrid(gx, gy)
-    kern = np.exp(-0.5 * (np.arange(-18, 19) / max(a.smooth, 0.1)) ** 2)
+    sig = max(a.smooth, 0.1) * 0.011 / gstep  # 関東(0.011度/格子)と同じ強さになるよう度に換算
+    kk = int(3 * sig) + 1
+    kern = np.exp(-0.5 * (np.arange(-kk, kk + 1) / sig) ** 2)
     kern /= kern.sum()
 
     def smooth(field):
@@ -504,8 +594,12 @@ def main():
             if a.reach > 0:  # 最も近い観測地点から遠い格子は塗らない
                 coslat = np.cos(np.radians(lat.mean()))
                 d2 = np.full(GX.shape, np.inf)
+                wx, wy = int(a.reach / (gstep * coslat)) + 2, int(a.reach / gstep) + 2  # 地点周囲の窓(格子数)
                 for x0, y0 in zip(lon[ok], lat[ok]):
-                    d2 = np.minimum(d2, ((GX - x0) * coslat) ** 2 + (GY - y0) ** 2)
+                    ix, iy = int((x0 - gx[0]) / gstep), int((y0 - gy[0]) / gstep)
+                    sx = slice(max(ix - wx, 0), ix + wx + 1)
+                    sy = slice(max(iy - wy, 0), iy + wy + 1)
+                    d2[sy, sx] = np.minimum(d2[sy, sx], ((GX[sy, sx] - x0) * coslat) ** 2 + (GY[sy, sx] - y0) ** 2)
                 z = np.ma.masked_where(d2 > a.reach ** 2, z)
             if a.smooth > 0:
                 z = smooth(z)
