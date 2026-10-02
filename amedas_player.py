@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.7 (変更時は VERSION 定数も更新)
+バージョン: v3.8 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.7 (全国の観測所一覧 stations.json に対応)"
+VERSION = "v3.8 (天気図を半透明で重ねる)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -442,6 +442,77 @@ def resolve_coord(name):
     return None
 
 
+# 気象庁の地上天気図: 東経140度を中心とした極ステレオ投影。枠の幅Wを1とした座標で表す。
+#   rho = CHART_S * tan((90-緯度)/2),  u = U0 + rho*sin(経度-140),  v = V0 + rho*cos(経度-140)
+#   (u,v)は枠の左上が原点。2000年1月1日00Zと2025年12月31日12Zの図の経緯線(20-50N, 120-160E)から決めた値。
+CHART_U0, CHART_V0, CHART_S = 0.5906, -0.495, 2.117
+CHART_RE = re.compile(r"(?<!\d)(\d{4})[-_./]?(\d{2})[-_./]?(\d{2})[-_./ T]?(\d{2})(?:UTC|utc|[zZ])?(?!\d)")
+CHART_EXT = (".png", ".gif", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+
+
+def index_charts(folder):
+    """天気図フォルダ(サブフォルダ含む)のファイル名から 時刻(UTC) -> ファイル の対応表を作る。
+    ファイル名に 年月日+時(例: 2000010100 / 2000-01-01_00z / 2000.01.01.00UTC)が入っていれば読める。"""
+    idx = {}
+    if not os.path.isdir(folder):
+        return idx
+    for root, _, files in os.walk(folder):
+        for fn in files:
+            if not fn.lower().endswith(CHART_EXT):
+                continue
+            m = None
+            for cand in (fn, os.path.join(os.path.relpath(root, folder), fn)):
+                m = CHART_RE.search(cand)
+                if m:
+                    break
+            if not m:
+                continue
+            try:
+                key = datetime.datetime(int(m[1]), int(m[2]), int(m[3]), int(m[4]))
+            except ValueError:
+                continue
+            path = os.path.join(root, fn)
+            if key not in idx or fn.lower().endswith(".png"):
+                idx[key] = path
+    return idx
+
+
+def chart_frame(arr):
+    """画像から天気図の枠(黒い長方形)を見つける。戻り値 (左, 右, 上, 下) の画素位置。"""
+    dark = arr.min(axis=2) < 110
+    cc, rc = dark.sum(axis=0), dark.sum(axis=1)
+    cols = np.where(cc > 0.6 * cc.max())[0]
+    rows = np.where(rc > 0.6 * rc.max())[0]
+    return cols.min(), cols.max(), rows.min(), rows.max()
+
+
+def chart_overlay(path, extent, alpha):
+    """天気図を緯度経度の格子(extent=(経度0,経度1,緯度0,緯度1))に変形し、白を透明にしたRGBAを返す。"""
+    from PIL import Image
+    arr = np.asarray(Image.open(path).convert("RGB")).astype(float)
+    xl, xr, yt, yb = chart_frame(arr)
+    W = float(xr - xl)
+    lon0, lon1, lat0, lat1 = extent
+    nx = int(min(1600, max(600, (lon1 - lon0) * 400)))
+    ny = int(nx * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
+    lons = np.linspace(lon0, lon1, nx)
+    lats = np.linspace(lat1, lat0, ny)
+    LO, LA = np.meshgrid(lons, lats)
+    rho = CHART_S * np.tan(np.radians((90 - LA) / 2))
+    dl = np.radians(LO - 140.0)
+    px = xl + (CHART_U0 + rho * np.sin(dl)) * W
+    py = yt + (CHART_V0 + rho * np.cos(dl)) * W
+    inside = (px >= xl) & (px <= xr) & (py >= yt) & (py <= yb)
+    x0 = np.clip(np.floor(px).astype(int), 0, arr.shape[1] - 2)
+    y0 = np.clip(np.floor(py).astype(int), 0, arr.shape[0] - 2)
+    fx, fy = (px - x0)[..., None], (py - y0)[..., None]
+    rgb = (arr[y0, x0] * (1 - fx) * (1 - fy) + arr[y0, x0 + 1] * fx * (1 - fy)
+           + arr[y0 + 1, x0] * (1 - fx) * fy + arr[y0 + 1, x0 + 1] * fx * fy)  # 双一次補間
+    dark = 1.0 - rgb.min(axis=2) / 255.0  # 白=0(透明) 線=濃いほど不透明
+    a = np.clip(dark * 1.6, 0, 1) * alpha * inside
+    return np.dstack([rgb / 255.0, a])
+
+
 def month_range(y, m):
     first = datetime.date(y, m, 1)
     last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
@@ -466,6 +537,9 @@ def main():
                     help="気温の突発的な異常値を除く。前後の時刻の平均から この値(℃)以上ずれ、前後の値どうしは近い点を欠測にする(0で無効)")
     ap.add_argument("--reach", type=float, default=1.0,
                     help="観測地点からこの距離(度, 約1度=100km)より遠い所は気温を塗らない。0で無効")
+    ap.add_argument("--chart-dir", default=None, help="天気図フォルダ(省略時はスクリプトと同じ場所の「天気図」)")
+    ap.add_argument("--chart-alpha", type=float, default=0.5, help="天気図の不透明度(0-1)。既定0.5")
+    ap.add_argument("--no-chart", action="store_true", help="天気図を重ねない")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -559,7 +633,22 @@ def main():
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
     # 表示のON/OFF (画面下のチェックボックス)。気温・風をOFFにすると標高(灰色)だけ見える。
-    show = {"temp": True, "wind": True, "pts": True, "val": False}
+    show = {"temp": True, "wind": True, "pts": True, "val": False, "chart": True}
+
+    # ---- 天気図: 00Z/12Z (日本時間の9:00/21:00)の時刻にだけ、緯度経度に変形して半透明で重ねる ----
+    chart_dir = a.chart_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "天気図")
+    chart_idx = {} if a.no_chart else index_charts(chart_dir)
+    if not a.no_chart:
+        if chart_idx:
+            print(f"天気図: {len(chart_idx)} 枚 ({min(chart_idx):%Y-%m-%d} 〜 {max(chart_idx):%Y-%m-%d}) {chart_dir}")
+        else:
+            print(f"天気図が見つかりません(重ねません): {chart_dir}  ※ファイル名に年月日+時(例 2000010100)が必要です")
+    xlim, ylim = ax.get_xlim(), ax.get_ylim()
+    chart_im = ax.imshow(np.zeros((2, 2, 4)), extent=(xlim[0], xlim[1], ylim[0], ylim[1]), origin="upper",
+                         zorder=2.2, aspect="auto")
+    chart_im.set_visible(False)
+    ax.set_xlim(xlim); ax.set_ylim(ylim)
+    chart_cache = {}
     dots = ax.scatter(lon, lat, s=6, c="k", zorder=2.6)
     pts_arts = [dots]
     name_arts = []
@@ -686,7 +775,7 @@ def main():
         fig.canvas.draw_idle()
 
     if bg["gray"] and not a.relief:
-        eax = fig.add_axes([0.82, 0.16, 0.14, 0.015])
+        eax = fig.add_axes([0.82, 0.16, 0.09, 0.015])
         eax.imshow(np.linspace(0.97, 0.67, 100)[None, :].repeat(2, 0), cmap="gray", vmin=0, vmax=1,
                    aspect="auto", extent=(0, 2500, 0, 1))
         eax.set_yticks([]); eax.set_xticks([0, 500, 1000, 1500, 2000, 2500])
@@ -730,7 +819,19 @@ def main():
         apply_view()
         for fn in on_time:
             fn(i)
-        title.set_text(f"{S['times'][i]}   [{VERSION.split()[0]}]")
+        chart_note = ""
+        utc = parse_time(S["times"][i]) - datetime.timedelta(hours=9)  # 日本時間 -> UTC
+        path = chart_idx.get(utc)
+        if path and show["chart"]:
+            if path not in chart_cache:
+                chart_cache.clear()  # 直前の1枚だけ保持
+                chart_cache[path] = chart_overlay(path, (xlim[0], xlim[1], ylim[0], ylim[1]), a.chart_alpha)
+            chart_im.set_data(chart_cache[path])
+            chart_im.set_visible(True)
+            chart_note = f"   天気図 {utc:%Y.%m.%d} {utc:%H}UTC"
+        else:
+            chart_im.set_visible(False)
+        title.set_text(f"{S['times'][i]}{chart_note}   [{VERSION.split()[0]}]")
         fig.canvas.draw_idle()
 
     if a.save:
@@ -768,8 +869,8 @@ def main():
 
     # 表示のON/OFF: ☑/☐ のトグルボタン (CheckButtonsの×印の代わり)
     toggles = {}
-    for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"))):
-        tg = Button(plt.axes([0.715, 0.185 - 0.03 * k, 0.085, 0.026]), "", color="white", hovercolor="0.92")
+    for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"), ("chart", "天気図"))):
+        tg = Button(plt.axes([0.915, 0.195 - 0.03 * k, 0.08, 0.026]), "", color="white", hovercolor="0.92")
         tg.label.set_fontsize(10)
         toggles[key] = (tg, label)
 
