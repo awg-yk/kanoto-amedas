@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.3 (変更時は VERSION 定数も更新)
+バージョン: v3.4 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -33,7 +33,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.3 (年・月のプルダウン、離島間の塗り)"
+VERSION = "v3.4 (日のプルダウン)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -583,6 +583,8 @@ def main():
     fig.canvas.mpl_connect("draw_event", draw_wind_legend)
     title = ax.set_title("")
 
+    on_time = []  # 時刻が変わったときに呼ぶ関数(日のプルダウンの同期など)
+
     def update(i):
         draw_temp(S["temp"][i])
         draw_wind(i)
@@ -599,6 +601,8 @@ def main():
             else:
                 art.set_text(n)
         apply_view()
+        for fn in on_time:
+            fn(i)
         title.set_text(f"{S['times'][i]}   [{VERSION.split()[0]}]")
         fig.canvas.draw_idle()
 
@@ -621,7 +625,7 @@ def main():
         bt.label.set_fontsize(8)
         step_btns.append((bt, unit, d))
     avail = scan_months(a.dir)
-    ym = {"cy": None, "cm": None}
+    ym = {"cy": None, "cm": None, "cd": None}
     use_tk = False
     try:  # TkAgg(Windowsの標準)なら、ウィンドウ上部に年・月のプルダウンを付ける
         import tkinter as tk
@@ -736,6 +740,23 @@ def main():
         ttk.Label(frame, text="月").pack(side=tk.LEFT, padx=(10, 2))
         ym["cm"] = ttk.Combobox(frame, width=4, state="readonly")
         ym["cm"].pack(side=tk.LEFT)
+        ttk.Label(frame, text="日").pack(side=tk.LEFT, padx=(10, 2))
+        ym["cd"] = ttk.Combobox(frame, width=4, state="readonly")
+        ym["cd"].pack(side=tk.LEFT)
+
+        def on_day(_=None):
+            cur = current_time()
+            go_to(datetime.datetime(S["start"].year, S["start"].month, int(ym["cd"].get()), cur.hour, 0))
+
+        ym["cd"].bind("<<ComboboxSelected>>", on_day)
+
+        def sync_day(i):
+            """表示中の時刻の「日」をプルダウンに反映する(月末の翌0:00は月の最終日として扱う)"""
+            d = min(max(parse_time(S["times"][i]).date(), S["start"]), S["end"])
+            ym["cd"].configure(values=list(range(1, S["end"].day + 1)))
+            ym["cd"].set(str(d.day))
+
+        on_time.append(sync_day)
 
         def on_year(_=None):
             y = int(ym["cy"].get())
