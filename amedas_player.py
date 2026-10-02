@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.2 (変更時は VERSION 定数も更新)
+バージョン: v3.3 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -33,7 +33,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.2 (既定フォルダをスクリプトの場所に変更)"
+VERSION = "v3.3 (年・月のプルダウン、離島間の塗り)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -177,6 +177,21 @@ def parse_time(t):
         except ValueError:
             pass
     raise ValueError(f"時刻を解釈できません: {t}")
+
+
+def scan_months(folder):
+    """folder以下のCSVのファイル名から、データのある (年, 月) の集合を返す"""
+    out = set()
+    for f in glob.glob(os.path.join(folder, "**", PATTERN), recursive=True):
+        m = FNAME_RE.search(os.path.basename(f))
+        if not m:
+            continue
+        d0, d1 = (datetime.date.fromisoformat(x) for x in m.groups())
+        k = d0.year * 12 + d0.month - 1
+        while k <= d1.year * 12 + d1.month - 1:
+            out.add((k // 12, k % 12 + 1))
+            k += 1
+    return out
 
 
 def find_files(folder, start, end):
@@ -359,8 +374,8 @@ def main():
     ap.add_argument("--smooth", type=float, default=4.0, help="等温線の平滑化の強さ(格子数、0で無し)")
     ap.add_argument("--despike", type=float, default=0.0,
                     help="気温の突発的な異常値を除く。前後の時刻の平均から この値(℃)以上ずれ、前後の値どうしは近い点を欠測にする(0で無効)")
-    ap.add_argument("--reach", type=float, default=0.45,
-                    help="観測地点からこの距離(度, 約1度=100km)より遠い所は気温を塗らない(離島との間の海など)。0で無効")
+    ap.add_argument("--reach", type=float, default=1.0,
+                    help="観測地点からこの距離(度, 約1度=100km)より遠い所は気温を塗らない。0で無効")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -605,7 +620,19 @@ def main():
         bt = Button(plt.axes([x0, 0.03, 0.05, 0.05]), f"{'+' if d > 0 else '-'}1{unit}")
         bt.label.set_fontsize(8)
         step_btns.append((bt, unit, d))
-    tb = TextBox(plt.axes([0.30, 0.10, 0.09, 0.05]), "年月 ", initial=f"{S['start'].year}-{S['start'].month:02d}")
+    avail = scan_months(a.dir)
+    ym = {"cy": None, "cm": None}
+    use_tk = False
+    try:  # TkAgg(Windowsの標準)なら、ウィンドウ上部に年・月のプルダウンを付ける
+        import tkinter as tk
+        from tkinter import ttk
+        win = fig.canvas.manager.window
+        use_tk = isinstance(win, tk.Misc)
+    except Exception:
+        use_tk = False
+    tb = None
+    if not use_tk:  # プルダウンが使えない環境では、これまでどおり入力欄
+        tb = TextBox(plt.axes([0.30, 0.10, 0.09, 0.05]), "年月 ", initial=f"{S['start'].year}-{S['start'].month:02d}")
     msg = fig.text(0.15, 0.165, "", fontsize=9, color="crimson")
 
     # 表示のON/OFF: ☑/☐ のトグルボタン (CheckButtonsの×印の代わり)
@@ -642,14 +669,15 @@ def main():
         try:
             read(d0, d1)
         except FileNotFoundError:
-            S.update(old); msg.set_text(f"{y}-{m:02d} のCSVがありません"); fig.canvas.draw_idle(); return
+            S.update(old); msg.set_text(f"{y}-{m:02d} のCSVがありません")
+            sync_ym(S["start"].year, S["start"].month); fig.canvas.draw_idle(); return
         msg.set_text("")
         state["playing"] = False
         slider.valmax = len(S["times"]) - 1
         slider.ax.set_xlim(slider.valmin, slider.valmax)
         state["i"] = nearest_index(target) if target else 0
         slider.set_val(state["i"])
-        tb.set_val(f"{y}-{m:02d}")
+        sync_ym(y, m)
         update(state["i"])
 
     def nearest_index(dt):
@@ -688,7 +716,41 @@ def main():
         if (y, m) != (S["start"].year, S["start"].month):
             load_month(y, m)
 
-    tb.on_submit(on_submit)
+    def sync_ym(y, m):
+        """表示中の年月を、プルダウン(または入力欄)に反映する"""
+        if ym["cy"] is not None:
+            years = sorted({yy for yy, _ in avail} | {y})
+            ym["cy"].configure(values=years)
+            ym["cy"].set(str(y))
+            ym["cm"].configure(values=sorted({mm for yy, mm in avail if yy == y} | {m}))
+            ym["cm"].set(str(m))
+        elif tb is not None:
+            tb.set_val(f"{y}-{m:02d}")
+
+    if use_tk:
+        frame = ttk.Frame(win)
+        frame.pack(side=tk.TOP, fill=tk.X, before=fig.canvas.get_tk_widget())
+        ttk.Label(frame, text="年").pack(side=tk.LEFT, padx=(10, 2))
+        ym["cy"] = ttk.Combobox(frame, width=6, state="readonly")
+        ym["cy"].pack(side=tk.LEFT)
+        ttk.Label(frame, text="月").pack(side=tk.LEFT, padx=(10, 2))
+        ym["cm"] = ttk.Combobox(frame, width=4, state="readonly")
+        ym["cm"].pack(side=tk.LEFT)
+
+        def on_year(_=None):
+            y = int(ym["cy"].get())
+            months = sorted(mm for yy, mm in avail if yy == y)
+            m = int(ym["cm"].get()) if ym["cm"].get() and int(ym["cm"].get()) in months else (months[0] if months else 1)
+            load_month(y, m)
+
+        def on_month(_=None):
+            load_month(int(ym["cy"].get()), int(ym["cm"].get()))
+
+        ym["cy"].bind("<<ComboboxSelected>>", on_year)
+        ym["cm"].bind("<<ComboboxSelected>>", on_month)
+        sync_ym(S["start"].year, S["start"].month)
+    else:
+        tb.on_submit(on_submit)
 
     def on_slide(v):
         state["i"] = int(v); update(state["i"])
