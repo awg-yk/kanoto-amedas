@@ -2,3 +2,4 @@ node_modules/
 *.vsix
 __pycache__/
 *.npz
+観測所一覧_不足.csv

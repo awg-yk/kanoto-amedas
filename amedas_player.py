@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.5 (変更時は VERSION 定数も更新)
+バージョン: v3.6 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -33,7 +33,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.5 (関東以外のデータ・観測所一覧に対応)"
+VERSION = "v3.6 (未登録地点の記入用CSV・同名地点の選択)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -410,8 +410,11 @@ def resolve_coord(name):
     for key in (name, base):
         if key in TABLE:
             c = TABLE[key]
-            if len(c) > 1:
-                print(f"  同名の地点が複数あります({key}): {c[0][3]} を使います。違う場合は観測所一覧を調整してください")
+            if len(c) > 1:  # 同名(例: 府中)が複数 → 関東の地点群の中心に最も近いものを採用
+                ref_lat = sum(v[0] for v in COORDS.values()) / len(COORDS)
+                ref_lon = sum(v[1] for v in COORDS.values()) / len(COORDS)
+                c = sorted(c, key=lambda v: (v[0] - ref_lat) ** 2 + ((v[1] - ref_lon) * 0.82) ** 2)
+                print(f"  同名の地点が複数あります({key}): {c[0][3]} を使います")
             return c[0][:3]
     return None
 
@@ -464,13 +467,23 @@ def main():
         first = load(a.dir, start, end)
     except FileNotFoundError as e:
         raise SystemExit(str(e))
+    unresolved = []
     for st_name in first[0]:  # 組み込みの関東の座標に無い地点(他の地域)は、観測所一覧から探す
         if st_name not in COORDS:
             c = resolve_coord(st_name)
             if c:
                 COORDS[st_name] = c
             else:
-                print("座標未登録(スキップ):", st_name, "← 観測所一覧に地点名と緯度・経度を足してください")
+                unresolved.append(st_name)
+    if unresolved:
+        print(f"座標未登録(地図に出しません) {len(unresolved)} 地点: " + "、".join(unresolved))
+        todo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "観測所一覧_不足.csv")
+        with open(todo, "w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["地点名", "緯度", "経度", "標高(m)", "都道府県"])
+            for n in unresolved:
+                w.writerow([n, "", "", "", ""])
+        print(f"→ {os.path.basename(todo)} に地点名を書き出しました。緯度・経度を入れて「観測所一覧.csv」に足してください")
     names = [n for n in COORDS if a.islands or n not in ISLANDS]
     lat = np.array([COORDS[n][0] for n in names])
     lon = np.array([COORDS[n][1] for n in names])
@@ -482,9 +495,6 @@ def main():
         first_used["used"] = True
         if not times:
             raise FileNotFoundError(f"{d0}〜{d1} のデータ行がありません")
-        for st in stations:
-            if st not in COORDS:
-                print("座標未登録(スキップ):", st)
         if a.despike > 0:
             temp = despike(temp, a.despike, stations, times)
         idx = [stations.index(n) if n in stations else -1 for n in names]
