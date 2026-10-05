@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.9 (変更時は VERSION 定数も更新)
+バージョン: v3.10 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.9 (ウィンドプロファイラを重ねる)"
+VERSION = "v3.10 (プロファイラのフォルダ名の表記ゆれに対応)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -519,6 +519,18 @@ WP_HEIGHTS = [500, 1000, 1500, 2000, 3000, 4000, 5000]  # 表示する高さ(m, 
 _wp = {"decoder": None, "failed": False, "days": {}, "files": {}}
 
 
+def find_wp_dir(base):
+    """スクリプトと同じ階層から、名前に「プロファイラ」を含むフォルダを探す
+    (「ウィンド」「ウインド」など表記の違いがあっても見つかるようにする)"""
+    try:
+        for name in sorted(os.listdir(base)):
+            if "プロファイラ" in name and os.path.isdir(os.path.join(base, name)):
+                return os.path.join(base, name)
+    except OSError:
+        pass
+    return os.path.join(base, "ウィンドプロファイラー")
+
+
 def wp_decoder():
     """pybufrkit(BUFRの純Python解読ライブラリ)を必要になったときだけ読み込む"""
     if _wp["decoder"] is None and not _wp["failed"]:
@@ -664,7 +676,7 @@ def main():
     ap.add_argument("--chart-dir", default=None, help="天気図フォルダ(省略時はスクリプトと同じ場所の「天気図」)")
     ap.add_argument("--chart-alpha", type=float, default=0.5, help="天気図の不透明度(0-1)。既定0.5")
     ap.add_argument("--no-chart", action="store_true", help="天気図を重ねない")
-    ap.add_argument("--wp-dir", default=None, help="ウィンドプロファイラのフォルダ(省略時はスクリプトと同じ場所の「ウインドプロファイラー」)")
+    ap.add_argument("--wp-dir", default=None, help="ウィンドプロファイラのフォルダ(省略時はスクリプトと同じ場所の、名前に「プロファイラ」を含むフォルダ)")
     ap.add_argument("--no-wp", action="store_true", help="ウィンドプロファイラを重ねない")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
@@ -760,7 +772,7 @@ def main():
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
     # 表示のON/OFF (画面下のチェックボックス)。気温・風をOFFにすると標高(灰色)だけ見える。
     show = {"temp": True, "wind": True, "pts": True, "val": False, "chart": True, "wp": True}
-    wp_dir = a.wp_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ウインドプロファイラー")
+    wp_dir = a.wp_dir or find_wp_dir(os.path.dirname(os.path.abspath(__file__)))
     use_wp = (not a.no_wp) and os.path.isdir(wp_dir)
     if not a.no_wp:
         print("ウィンドプロファイラ:", wp_dir if use_wp else f"フォルダがありません(重ねません): {wp_dir}")
