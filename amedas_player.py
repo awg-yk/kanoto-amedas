@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.10 (変更時は VERSION 定数も更新)
+バージョン: v3.11 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.10 (プロファイラのフォルダ名の表記ゆれに対応)"
+VERSION = "v3.11 (日付の境目(9時)のプロファイラを表示)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -607,8 +607,9 @@ def wp_decode(path):
                         elif k in ("4001", "4002", "4003", "4004"):
                             tp[k] = v
                         elif k == "4005":  # 分 = 1つの観測時刻の始まり
-                            try:
-                                t = datetime.datetime(tp["4001"], tp["4002"], tp["4003"], tp["4004"], v)
+                            try:  # 24:00(翌日0:00)と書かれていても読めるよう、日付に時間・分を足して作る
+                                t = (datetime.datetime(tp["4001"], tp["4002"], tp["4003"])
+                                     + datetime.timedelta(hours=tp["4004"], minutes=v))
                                 obs = st["obs"].setdefault(t, [])
                             except (KeyError, TypeError, ValueError):
                                 obs = None
@@ -631,10 +632,18 @@ def wp_decode(path):
 def wp_winds(folder, utc, extent, height):
     """時刻utc(きっかり)の、extent内の局の「heightメートルに最も近い層」の風。[(lon, lat, u, v), ...]"""
     cands = []
-    for day in {utc.date(), (utc + datetime.timedelta(minutes=50)).date()}:
+    for off in (-1, 0, 1):  # 日付の境目(0:00)のファイルは、前後の日のフォルダにあることもある
+        day = utc.date() + datetime.timedelta(days=off)
         cands += [c for c in wp_list_day(folder, day) if utc <= c[0] <= utc + datetime.timedelta(minutes=50)]
     out, seen = [], set()
     lon0, lon1, lat0, lat1 = extent
+    if _wp.get("debug"):  # --wp-debug: どのファイルを見て、どの時刻の観測が入っていたかを表示
+        print(f"[wp] {utc:%Y-%m-%d %H:%M}UTC 候補ファイル {len(cands)} 個")
+        for ft, ty, path in sorted(cands):
+            sts = wp_decode(path)
+            ts = sorted({t for st in sts for t in st["obs"]})
+            print(f"[wp]   {os.path.basename(path)}  局{len(sts)}  観測 {ts[0]:%d %H:%M}〜{ts[-1]:%d %H:%M}" if ts else
+                  f"[wp]   {os.path.basename(path)}  局{len(sts)}  観測時刻なし")
     for _, _, path in sorted(cands):
         for st in wp_decode(path):
             if st["id"] in seen or not (lon0 <= st["lon"] <= lon1 and lat0 <= st["lat"] <= lat1):
@@ -678,6 +687,7 @@ def main():
     ap.add_argument("--no-chart", action="store_true", help="天気図を重ねない")
     ap.add_argument("--wp-dir", default=None, help="ウィンドプロファイラのフォルダ(省略時はスクリプトと同じ場所の、名前に「プロファイラ」を含むフォルダ)")
     ap.add_argument("--no-wp", action="store_true", help="ウィンドプロファイラを重ねない")
+    ap.add_argument("--wp-debug", action="store_true", help="ウィンドプロファイラの読み込み状況を表示(原因調べ用)")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -777,6 +787,7 @@ def main():
     if not a.no_wp:
         print("ウィンドプロファイラ:", wp_dir if use_wp else f"フォルダがありません(重ねません): {wp_dir}")
     wp_state = {"height": 1000, "q": None, "mk": None}
+    _wp["debug"] = a.wp_debug
 
     # ---- 天気図: 00Z/12Z (日本時間の9:00/21:00)の時刻にだけ、緯度経度に変形して半透明で重ねる ----
     chart_dir = a.chart_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "天気図")
