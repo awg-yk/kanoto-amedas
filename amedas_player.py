@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.8 (変更時は VERSION 定数も更新)
+バージョン: v3.9 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.8 (天気図を半透明で重ねる)"
+VERSION = "v3.9 (ウィンドプロファイラを重ねる)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -513,6 +513,130 @@ def chart_overlay(path, extent, alpha):
     return np.dstack([rgb / 255.0, a])
 
 
+# ---- ウィンドプロファイラ (BUFR電文。1ファイル=複数局×直近1時間(10分おき6時刻)×高さ別の風) ----
+WP_RE = re.compile(r"(IUP[A-Z]\d{2})(?:_?[A-Z]{4}_?)?(\d{2})(\d{2})(\d{2})")
+WP_HEIGHTS = [500, 1000, 1500, 2000, 3000, 4000, 5000]  # 表示する高さ(m, 局の標高からの高さ)
+_wp = {"decoder": None, "failed": False, "days": {}, "files": {}}
+
+
+def wp_decoder():
+    """pybufrkit(BUFRの純Python解読ライブラリ)を必要になったときだけ読み込む"""
+    if _wp["decoder"] is None and not _wp["failed"]:
+        try:
+            import logging
+            logging.getLogger("pybufrkit").setLevel(logging.ERROR)
+            from pybufrkit.decoder import Decoder
+            _wp["decoder"] = Decoder()
+        except ImportError:
+            _wp["failed"] = True
+            print("ウィンドプロファイラの表示には pybufrkit が必要です: py -m pip install pybufrkit")
+    return _wp["decoder"]
+
+
+def wp_list_day(folder, day):
+    """folder/年/月/日/ にあるファイルを (ファイル名の時刻[UTC], 種別, パス) の一覧にする"""
+    if (folder, day) in _wp["days"]:
+        return _wp["days"][(folder, day)]
+    out = []
+    for sub in (f"{day.year:04d}/{day.month:02d}/{day.day:02d}", f"{day.year}/{day.month}/{day.day}"):
+        d = os.path.join(folder, *sub.split("/"))
+        if not os.path.isdir(d):
+            continue
+        for root, _, files in os.walk(d):
+            for fn in files:
+                m = WP_RE.search(fn)
+                if not m:
+                    continue
+                dd, hh, mm = int(m[2]), int(m[3]), int(m[4])
+                for off in (0, -1, 1):  # ファイル名の日(dd)は、フォルダの日の前後のこともある
+                    base = day + datetime.timedelta(days=off)
+                    if base.day == dd:
+                        try:
+                            out.append((datetime.datetime(base.year, base.month, base.day, hh, mm), m[1],
+                                        os.path.join(root, fn)))
+                        except ValueError:
+                            pass
+                        break
+        break
+    _wp["days"][(folder, day)] = out
+    return out
+
+
+def wp_decode(path):
+    """1ファイルを解読して局ごとのデータにする。
+    戻り値: [{"id","lat","lon","obs":{観測時刻(UTC): [(高さ, 東西風u, 南北風v), ...]}}, ...]"""
+    if path in _wp["files"]:
+        return _wp["files"][path]
+    dec = wp_decoder()
+    stations = []
+    if dec is not None:
+        data = open(path, "rb").read()
+        pos = 0
+        while True:
+            i = data.find(b"BUFR", pos)
+            if i < 0:
+                break
+            n = int.from_bytes(data[i + 4:i + 7], "big")
+            try:
+                msg = dec.process(data[i:i + n])
+                td = msg.template_data.value
+                for descs, vals in zip(td.decoded_descriptors_all_subsets, td.decoded_values_all_subsets):
+                    st, tp, obs, lev = {"obs": {}}, {}, None, None
+                    for d, v in zip(descs, vals):
+                        k = str(d.id).lstrip("0")
+                        if k == "1001":
+                            blk = v
+                        elif k == "1002":
+                            st["id"] = f"{blk:02d}{v:03d}" if v is not None and blk is not None else "?"
+                        elif k in ("5001", "5002"):
+                            st["lat"] = v
+                        elif k in ("6001", "6002"):
+                            st["lon"] = v
+                        elif k in ("4001", "4002", "4003", "4004"):
+                            tp[k] = v
+                        elif k == "4005":  # 分 = 1つの観測時刻の始まり
+                            try:
+                                t = datetime.datetime(tp["4001"], tp["4002"], tp["4003"], tp["4004"], v)
+                                obs = st["obs"].setdefault(t, [])
+                            except (KeyError, TypeError, ValueError):
+                                obs = None
+                        elif k == "7006" and obs is not None:  # 局からの高さ = 新しい層
+                            lev = [v, None, None]
+                            obs.append(lev)
+                        elif k == "11003" and lev is not None:
+                            lev[1] = v
+                        elif k == "11004" and lev is not None:
+                            lev[2] = v
+                    if st.get("lat") is not None and st.get("lon") is not None:
+                        stations.append(st)
+            except Exception:
+                pass
+            pos = i + max(n, 4)
+    _wp["files"][path] = stations
+    return stations
+
+
+def wp_winds(folder, utc, extent, height):
+    """時刻utc(きっかり)の、extent内の局の「heightメートルに最も近い層」の風。[(lon, lat, u, v), ...]"""
+    cands = []
+    for day in {utc.date(), (utc + datetime.timedelta(minutes=50)).date()}:
+        cands += [c for c in wp_list_day(folder, day) if utc <= c[0] <= utc + datetime.timedelta(minutes=50)]
+    out, seen = [], set()
+    lon0, lon1, lat0, lat1 = extent
+    for _, _, path in sorted(cands):
+        for st in wp_decode(path):
+            if st["id"] in seen or not (lon0 <= st["lon"] <= lon1 and lat0 <= st["lat"] <= lat1):
+                continue
+            levels = [l for l in st["obs"].get(utc, []) if None not in l]
+            if not levels:
+                continue
+            h, u, v = min(levels, key=lambda l: abs(l[0] - height))
+            if abs(h - height) <= 200:
+                out.append((st["lon"], st["lat"], u, v))
+                seen.add(st["id"])
+    return out
+
+
 def month_range(y, m):
     first = datetime.date(y, m, 1)
     last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
@@ -540,6 +664,8 @@ def main():
     ap.add_argument("--chart-dir", default=None, help="天気図フォルダ(省略時はスクリプトと同じ場所の「天気図」)")
     ap.add_argument("--chart-alpha", type=float, default=0.5, help="天気図の不透明度(0-1)。既定0.5")
     ap.add_argument("--no-chart", action="store_true", help="天気図を重ねない")
+    ap.add_argument("--wp-dir", default=None, help="ウィンドプロファイラのフォルダ(省略時はスクリプトと同じ場所の「ウインドプロファイラー」)")
+    ap.add_argument("--no-wp", action="store_true", help="ウィンドプロファイラを重ねない")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -633,7 +759,12 @@ def main():
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
     # 表示のON/OFF (画面下のチェックボックス)。気温・風をOFFにすると標高(灰色)だけ見える。
-    show = {"temp": True, "wind": True, "pts": True, "val": False, "chart": True}
+    show = {"temp": True, "wind": True, "pts": True, "val": False, "chart": True, "wp": True}
+    wp_dir = a.wp_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ウインドプロファイラー")
+    use_wp = (not a.no_wp) and os.path.isdir(wp_dir)
+    if not a.no_wp:
+        print("ウィンドプロファイラ:", wp_dir if use_wp else f"フォルダがありません(重ねません): {wp_dir}")
+    wp_state = {"height": 1000, "q": None, "mk": None}
 
     # ---- 天気図: 00Z/12Z (日本時間の9:00/21:00)の時刻にだけ、緯度経度に変形して半透明で重ねる ----
     chart_dir = a.chart_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "天気図")
@@ -771,7 +902,7 @@ def main():
             lax.quiver([8], [y], [v / 25 * px_deg], [0], angles="xy", scale_units="xy", scale=1,
                        units="dots", width=width_px, color="k")
             lax.text(8 + v / 25 * px_deg + 8, y, f"{v} m/s", fontsize=9, va="center")
-        lax.text(2, 8, "矢印は風の吹く向き(静穏・欠測は矢印なし)", fontsize=8, va="center", color="0.3")
+        lax.text(2, 8, "黒:地上の風 紫▲:高層風(WP)", fontsize=8, va="center", color="0.3")
         fig.canvas.draw_idle()
 
     if bg["gray"] and not a.relief:
@@ -821,6 +952,18 @@ def main():
             fn(i)
         chart_note = ""
         utc = parse_time(S["times"][i]) - datetime.timedelta(hours=9)  # 日本時間 -> UTC
+        if wp_state["q"] is not None:
+            wp_state["q"].remove(); wp_state["q"] = None
+        if wp_state["mk"] is not None:
+            wp_state["mk"].remove(); wp_state["mk"] = None
+        if use_wp and show["wp"]:
+            ws = wp_winds(wp_dir, utc, (xlim[0], xlim[1], ylim[0], ylim[1]), wp_state["height"])
+            if ws:
+                wl, wa, wu, wv = (np.array(c) for c in zip(*ws))
+                wp_state["q"] = ax.quiver(wl, wa, wu, wv, angles="xy", scale_units="xy", scale=25, width=0.004,
+                                          color="#7b1fa2", zorder=3.2)
+                wp_state["mk"] = ax.scatter(wl, wa, marker="^", s=28, color="#7b1fa2", zorder=3.3)
+                chart_note += f"   プロファイラ {wp_state['height']}m"
         path = chart_idx.get(utc)
         if path and show["chart"]:
             if path not in chart_cache:
@@ -869,7 +1012,7 @@ def main():
 
     # 表示のON/OFF: ☑/☐ のトグルボタン (CheckButtonsの×印の代わり)
     toggles = {}
-    for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"), ("chart", "天気図"))):
+    for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"), ("chart", "天気図"), ("wp", "高層風"))):
         tg = Button(plt.axes([0.915, 0.195 - 0.03 * k, 0.08, 0.026]), "", color="white", hovercolor="0.92")
         tg.label.set_fontsize(10)
         toggles[key] = (tg, label)
@@ -985,6 +1128,18 @@ def main():
             ym["cd"].set(str(d.day))
 
         on_time.append(sync_day)
+
+        if use_wp:
+            ttk.Label(frame, text="プロファイラの高さ").pack(side=tk.LEFT, padx=(20, 2))
+            ch = ttk.Combobox(frame, width=8, state="readonly", values=[f"{h} m" for h in WP_HEIGHTS])
+            ch.set(f"{wp_state['height']} m")
+            ch.pack(side=tk.LEFT)
+
+            def on_height(_=None):
+                wp_state["height"] = int(ch.get().split()[0])
+                update(state["i"])
+
+            ch.bind("<<ComboboxSelected>>", on_height)
 
         def on_year(_=None):
             y = int(ym["cy"].get())
