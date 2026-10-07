@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.13 (変更時は VERSION 定数も更新)
+バージョン: v3.14 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.13 (ボタン式の切り替え・±12時間・stations.jsonのみで座標)"
+VERSION = "v3.14 (天気図の読み込みを復旧・ボタン式・±12時間)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -397,6 +397,88 @@ def scan_station_names(folder):
         except OSError:
             continue
     return names, n_files
+
+
+# 気象庁の地上天気図: 東経140度を中心とした極ステレオ投影。枠の幅Wを1とした座標で表す。
+#   rho = CHART_S * tan((90-緯度)/2),  u = U0 + rho*sin(経度-140),  v = V0 + rho*cos(経度-140)
+#   (u,v)は枠の左上が原点。2000年1月1日00Zと2025年12月31日12Zの図の経緯線(20-50N, 120-160E)から決めた値。
+CHART_U0, CHART_V0, CHART_S = 0.5906, -0.495, 2.117
+CHART_RE = re.compile(r"(?<!\d)(\d{4})[-_./]?(\d{2})[-_./]?(\d{2})[-_./ T]?(\d{2})(?:UTC|utc|[zZ])?(?!\d)")
+CHART_EXT = (".png", ".gif", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+
+
+def index_charts(folder):
+    """天気図フォルダ(サブフォルダ含む)のファイル名から 時刻(UTC) -> ファイル の対応表を作る。
+    ファイル名に 年月日+時(例: 2000010100 / 2000-01-01_00z / 2000.01.01.00UTC)が入っていれば読める。"""
+    idx = {}
+    if not os.path.isdir(folder):
+        return idx
+    for root, _, files in os.walk(folder):
+        for fn in files:
+            if not fn.lower().endswith(CHART_EXT):
+                continue
+            m = None
+            for cand in (fn, os.path.join(os.path.relpath(root, folder), fn)):
+                m = CHART_RE.search(cand)
+                if m:
+                    break
+            if not m:
+                continue
+            try:
+                key = datetime.datetime(int(m[1]), int(m[2]), int(m[3]), int(m[4]))
+            except ValueError:
+                continue
+            path = os.path.join(root, fn)
+            if key not in idx or fn.lower().endswith(".png"):
+                idx[key] = path
+    return idx
+
+
+def chart_frame(arr):
+    """画像から天気図の枠(黒い長方形)を見つける。戻り値 (左, 右, 上, 下) の画素位置。"""
+    dark = arr.min(axis=2) < 110
+    cc, rc = dark.sum(axis=0), dark.sum(axis=1)
+    cols = np.where(cc > 0.6 * cc.max())[0]
+    rows = np.where(rc > 0.6 * rc.max())[0]
+    return cols.min(), cols.max(), rows.min(), rows.max()
+
+
+_chart_geo = {}  # (枠, 画像サイズ, 範囲) -> 変換の座標と重み。天気図ごとに作り直さない
+
+
+def chart_overlay(path, extent, alpha):
+    """天気図を緯度経度の格子(extent=(経度0,経度1,緯度0,緯度1))に変形し、白を透明にしたRGBAを返す。"""
+    from PIL import Image
+    arr = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32)
+    xl, xr, yt, yb = chart_frame(arr)
+    key = (int(xl), int(xr), int(yt), int(yb), arr.shape, tuple(extent))
+    geo = _chart_geo.get(key)
+    if geo is None:
+        W = float(xr - xl)
+        lon0, lon1, lat0, lat1 = extent
+        nx = int(min(1100, max(600, (lon1 - lon0) * 300)))
+        ny = int(nx * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
+        LO, LA = np.meshgrid(np.linspace(lon0, lon1, nx), np.linspace(lat1, lat0, ny))
+        rho = CHART_S * np.tan(np.radians((90 - LA) / 2))
+        dl = np.radians(LO - 140.0)
+        px = xl + (CHART_U0 + rho * np.sin(dl)) * W
+        py = yt + (CHART_V0 + rho * np.cos(dl)) * W
+        inside = (px >= xl) & (px <= xr) & (py >= yt) & (py <= yb)
+        x0 = np.clip(np.floor(px).astype(int), 0, arr.shape[1] - 2)
+        y0 = np.clip(np.floor(py).astype(int), 0, arr.shape[0] - 2)
+        fx, fy = (px - x0).astype(np.float32), (py - y0).astype(np.float32)
+        geo = (x0, y0, fx, fy, inside)
+        _chart_geo.clear()
+        _chart_geo[key] = geo
+    x0, y0, fx, fy, inside = geo
+    m = arr.min(axis=2)  # 白さ(白=255)だけを先に双一次補間(色は後で)
+    w00, w10, w01, w11 = (1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy
+    def samp(a2):
+        return a2[y0, x0] * w00 + a2[y0, x0 + 1] * w10 + a2[y0 + 1, x0] * w01 + a2[y0 + 1, x0 + 1] * w11
+    rgb = np.dstack([samp(arr[..., c]) for c in range(3)])
+    dark = 1.0 - samp(m) / 255.0  # 白=0(透明) 線=濃いほど不透明
+    a = np.clip(dark * 1.6, 0, 1) * alpha * inside
+    return np.dstack([rgb / 255.0, a]).astype(np.float32)
 
 
 # ---- ウィンドプロファイラ (BUFR電文。1ファイル=複数局×直近1時間(10分おき6時刻)×高さ別の風) ----
