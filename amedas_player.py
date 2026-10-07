@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.15 (変更時は VERSION 定数も更新)
+バージョン: v3.16 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.15 (時のプルダウン・元の天気図を右上に表示・同名地点の選択を修正)"
+VERSION = "v3.16 (地図が横に伸びる不具合を修正)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -811,7 +811,8 @@ def main():
             print("地形の取得に失敗したため地形なしで続行:", e)
     ax.set_xlim(lon.min() - 0.15, lon.max() + 0.15)
     ax.set_ylim(lat.min() - 0.15, lat.max() + 0.15)
-    ax.set_aspect(1 / np.cos(np.radians(lat.mean())))
+    geo_aspect = 1 / np.cos(np.radians(lat.mean()))  # 緯度経度を実際の距離の比に合わせる
+    ax.set_aspect(geo_aspect)
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
     # 表示のON/OFF (画面下のチェックボックス)。気温・風をOFFにすると標高(灰色)だけ見える。
@@ -833,9 +834,10 @@ def main():
             print(f"天気図が見つかりません(重ねません): {chart_dir}  ※ファイル名に年月日+時(例 2000010100)が必要です")
     xlim, ylim = ax.get_xlim(), ax.get_ylim()
     chart_im = ax.imshow(np.zeros((2, 2, 4)), extent=(xlim[0], xlim[1], ylim[0], ylim[1]), origin="upper",
-                         zorder=2.2, aspect="auto")
+                         zorder=2.2, aspect=geo_aspect)  # "auto" にすると地図が横に伸びる
     chart_im.set_visible(False)
     ax.set_xlim(xlim); ax.set_ylim(ylim)
+    ax.set_aspect(geo_aspect)
     persist_arts.extend(animate([chart_im]))
     # 右上: 拡大していない元の天気図(小さく)。天気図のある時刻だけ表示する
     iax = fig.add_axes([0.835, 0.735, 0.15, 0.225])
