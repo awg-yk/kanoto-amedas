@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.14 (変更時は VERSION 定数も更新)
+バージョン: v3.15 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.14 (天気図の読み込みを復旧・ボタン式・±12時間)"
+VERSION = "v3.15 (時のプルダウン・元の天気図を右上に表示・同名地点の選択を修正)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -352,24 +352,26 @@ def load_station_table(folders):
 
 def resolve_coord(name, when=None, verbose=False):
     """CSVの地点名から (緯度, 経度, 標高) を探す。「つくば（館野）」のような括弧付きは括弧を除いた名前でも探す。
-    同じ名前が複数あるとき: データの日付(when)に観測していた旧地点があればそれを、なければ現役の地点を選び、
-    それでも複数なら関東の中心(REF_POINT)に最も近いものを選ぶ。"""
+    同じ名前が複数あるとき:
+      1) まず関東の中心(REF_POINT)に最も近い場所を選び、その場所と同じ所(約15km以内=移転前後の旧地点)だけに絞る
+         (例: 伏木は富山県。大分県にあった同名の廃止地点は、遠いので選ばない)
+      2) その中で、データの日付(when)に観測していた旧地点があればそれを、なければ現役の地点を選ぶ"""
     base = re.sub(r"[（(].*?[）)]", "", name).strip()
+    ref_lat, ref_lon = REF_POINT
+    dist = lambda p, q: math.hypot(p[0] - q[0], (p[1] - q[1]) * 0.82)
     for key in (name, base):
         if key not in TABLE:
             continue
         cands = TABLE[key]
         if len(cands) > 1:
-            pool = cands
-            if when is not None:
-                cover = [c for c in cands if (c[4] is None or c[4] <= when) and (c[5] is None or when <= c[5])]
-                pool = [c for c in cover if not c[6]] or [c for c in cover if c[6]] or cands
-            if len(pool) > 1:  # 同名(例: 川内)が複数 → 関東の中心に最も近いものを採用
-                ref_lat, ref_lon = REF_POINT
-                pool = sorted(pool, key=lambda v: (v[0] - ref_lat) ** 2 + ((v[1] - ref_lon) * 0.82) ** 2)
-                if verbose:
-                    print(f"  同名の地点が複数あります({key}): {pool[0][3]} を使います")
-            c = pool[0]
+            nearest = min(cands, key=lambda v: dist(v, (ref_lat, ref_lon)))
+            pool = [c for c in cands if dist(c, nearest) <= 0.15]  # 同じ場所(移転前後)
+            if when is not None and len(pool) > 1:
+                cover = [c for c in pool if (c[4] is None or c[4] <= when) and (c[5] is None or when <= c[5])]
+                pool = [c for c in cover if not c[6]] or [c for c in cover if c[6]] or pool
+            if verbose and len(pool) < len(cands):
+                print(f"  同名の地点が複数あります({key}): {nearest[3]} を使います")
+            c = min(pool, key=lambda v: dist(v, (ref_lat, ref_lon)))
         else:
             c = cands[0]
         return c[:3]
@@ -626,6 +628,17 @@ def wp_winds(folder, utc, extent, height):
     return out
 
 
+def chart_thumbnail(path, width=520):
+    """元の天気図から枠の内側だけを切り出して縮小した画像(右上の小さな表示用)"""
+    from PIL import Image
+    img = Image.open(path).convert("RGB")
+    xl, xr, yt, yb = chart_frame(np.asarray(img))
+    img = img.crop((int(xl), int(yt), int(xr) + 1, int(yb) + 1))
+    if img.width > width:
+        img = img.resize((width, int(img.height * width / img.width)), Image.LANCZOS)
+    return np.asarray(img)
+
+
 def month_range(y, m):
     first = datetime.date(y, m, 1)
     last = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
@@ -702,6 +715,9 @@ def main():
             for n in unresolved:
                 w.writerow([n, "", "", "", ""])
         print(f"→ {os.path.basename(todo)} に地点名を書き出しました。緯度・経度を入れて「観測所一覧.csv」に足してください")
+    far = [n for n in COORDS if math.hypot((COORDS[n][0] - REF_POINT[0]) * 111, (COORDS[n][1] - REF_POINT[1]) * 91) > 700]
+    if far:  # 関東から700km以上離れた地点: 同名の別の場所を選んでいないか確認用
+        print("※関東から遠い地点があります(地図の範囲が広がります): " + "、".join(f"{n}({COORDS[n][0]:.1f}N,{COORDS[n][1]:.1f}E)" for n in far))
     names = [n for n in all_names if n in COORDS and (not a.no_islands or n not in ISLANDS)]
     lat = np.array([COORDS[n][0] for n in names])
     lon = np.array([COORDS[n][1] for n in names])
@@ -821,6 +837,13 @@ def main():
     chart_im.set_visible(False)
     ax.set_xlim(xlim); ax.set_ylim(ylim)
     persist_arts.extend(animate([chart_im]))
+    # 右上: 拡大していない元の天気図(小さく)。天気図のある時刻だけ表示する
+    iax = fig.add_axes([0.835, 0.735, 0.15, 0.225])
+    iax.axis("off")
+    im_in = iax.imshow(np.zeros((2, 2, 3)), aspect="equal")
+    im_in.set_visible(False)
+    persist_arts.extend(animate([im_in]))
+    inset_state = {"path": None}
     chart_cache = {}
     dots = ax.scatter(lon, lat, s=6, c="k", zorder=2.6)
     pts_arts = [dots]
@@ -837,7 +860,7 @@ def main():
     tmax = np.ceil((a.tmax if a.tmax is not None else 40.0) / a.step) * a.step
     st = {"levels": np.arange(tmin, tmax + a.step / 2, a.step)}
     st["norm"] = matplotlib.colors.BoundaryNorm(st["levels"], cmap.N, extend="both")
-    cax = fig.add_axes([0.82, 0.52, 0.02, 0.38])
+    cax = fig.add_axes([0.82, 0.44, 0.02, 0.27])  # 右上は天気図の小さな表示に空ける
     fig.colorbar(matplotlib.cm.ScalarMappable(norm=st["norm"], cmap=cmap), cax=cax,
                  label="気温 (℃)", ticks=st["levels"][::max(1, int(round(5 / a.step)))])
     contours, labels = [], []
@@ -976,7 +999,7 @@ def main():
             frame_arts.extend(animate([qh["q"]]))
 
     # ---- 風速の凡例: 右側(カラーバーの下)。本体の矢印と同じ長さ(ピクセル)で描く ----
-    lax = fig.add_axes([0.80, 0.22, 0.19, 0.24])
+    lax = fig.add_axes([0.80, 0.21, 0.19, 0.20])
     lax.axis("off")
     legend_state = {"px": None}
 
@@ -1023,7 +1046,7 @@ def main():
         cax.set_visible(show["temp"])
 
     fig.canvas.mpl_connect("draw_event", draw_wind_legend)
-    title = ax.set_title("")
+    title = ax.set_title("", fontsize=18, fontweight="bold")
     persist_arts.extend(animate([title]))
 
     on_time = []  # 時刻が変わったときに呼ぶ関数(日のプルダウンの同期など)
@@ -1069,9 +1092,19 @@ def main():
                 chart_cache[path] = chart_overlay(path, (xlim[0], xlim[1], ylim[0], ylim[1]), a.chart_alpha)
             chart_im.set_data(chart_cache[path])
             chart_im.set_visible(True)
+            if inset_state["path"] != path:  # 元の天気図(枠の内側だけ・縮小)
+                inset_state["path"] = path
+                thumb = chart_thumbnail(path)
+                im_in.set_data(thumb)
+                th, tw = thumb.shape[:2]
+                im_in.set_extent((-0.5, tw - 0.5, th - 0.5, -0.5))  # 画像の大きさに合わせる(最初の仮の画像の大きさのままだと点になる)
+                iax.set_xlim(-0.5, tw - 0.5)
+                iax.set_ylim(th - 0.5, -0.5)
+            im_in.set_visible(True)
             pass  # 天気図の時刻は図の中に書かれているので、タイトルには出さない
         else:
             chart_im.set_visible(False)
+            im_in.set_visible(False)
         title.set_text(f"{S['times'][i]}{chart_note}   [{VERSION.split()[0]}]")
         refresh(full)
 
@@ -1101,7 +1134,7 @@ def main():
         bt.label.set_fontsize(8)
         step_btns.append((bt, kind, amount))
     avail = scan_months(a.dir)
-    ym = {"cy": None, "cm": None, "cd": None}
+    ym = {"cy": None, "cm": None, "cd": None, "ch": None}
     use_tk = False
     try:  # TkAgg(Windowsの標準)なら、ウィンドウ上部に年・月のプルダウンを付ける
         import tkinter as tk
@@ -1183,17 +1216,28 @@ def main():
             tb.set_val(f"{y}-{m:02d}")
 
     if use_tk:
+        tkfont = ("Yu Gothic UI", 13)  # ②日時を大きく
+        win.option_add("*TCombobox*Listbox.font", tkfont)
         frame = ttk.Frame(win)
         frame.pack(side=tk.TOP, fill=tk.X, before=fig.canvas.get_tk_widget())
-        ttk.Label(frame, text="年").pack(side=tk.LEFT, padx=(10, 2))
-        ym["cy"] = ttk.Combobox(frame, width=6, state="readonly")
-        ym["cy"].pack(side=tk.LEFT)
-        ttk.Label(frame, text="月").pack(side=tk.LEFT, padx=(10, 2))
-        ym["cm"] = ttk.Combobox(frame, width=4, state="readonly")
-        ym["cm"].pack(side=tk.LEFT)
-        ttk.Label(frame, text="日").pack(side=tk.LEFT, padx=(10, 2))
-        ym["cd"] = ttk.Combobox(frame, width=4, state="readonly")
-        ym["cd"].pack(side=tk.LEFT)
+
+        def pull(key, width, unit, pad=(10, 0)):
+            """プルダウンの後ろに単位(年・月・日・時)を付ける"""
+            ym[key] = ttk.Combobox(frame, width=width, state="readonly", font=tkfont)
+            ym[key].pack(side=tk.LEFT, padx=pad)
+            ttk.Label(frame, text=unit, font=tkfont).pack(side=tk.LEFT, padx=(2, 6))
+
+        pull("cy", 6, "年")
+        pull("cm", 4, "月")
+        pull("cd", 4, "日")
+        pull("ch", 4, "時")
+
+        def on_hour(_=None):
+            cur = current_time()
+            go_to(cur.replace(hour=int(ym["ch"].get()), minute=0))
+
+        ym["ch"].configure(values=list(range(24)))
+        ym["ch"].bind("<<ComboboxSelected>>", on_hour)
 
         def on_day(_=None):
             cur = current_time()
@@ -1206,12 +1250,13 @@ def main():
             d = min(max(parse_time(S["times"][i]).date(), S["start"]), S["end"])
             ym["cd"].configure(values=list(range(1, S["end"].day + 1)))
             ym["cd"].set(str(d.day))
+            ym["ch"].set(str(parse_time(S["times"][i]).hour))
 
         on_time.append(sync_day)
 
         if use_wp:
-            ttk.Label(frame, text="プロファイラの高さ").pack(side=tk.LEFT, padx=(20, 2))
-            ch = ttk.Combobox(frame, width=8, state="readonly", values=[f"{h} m" for h in WP_HEIGHTS])
+            ttk.Label(frame, text="プロファイラの高さ", font=tkfont).pack(side=tk.LEFT, padx=(20, 2))
+            ch = ttk.Combobox(frame, width=8, state="readonly", font=tkfont, values=[f"{h} m" for h in WP_HEIGHTS])
             ch.set(f"{wp_state['height']} m")
             ch.pack(side=tk.LEFT)
 
