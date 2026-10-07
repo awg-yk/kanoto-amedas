@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.11 (変更時は VERSION 定数も更新)
+バージョン: v3.12 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,13 +34,19 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.11 (日付の境目(9時)のプロファイラを表示)"
+VERSION = "v3.12 (離島を既定で表示・軽量化)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
 ISLANDS = {"大島", "大島北ノ山", "新島", "神津島", "三宅島", "三宅坪田", "八重見ヶ原", "八丈島"}  # --islands を付けたときだけ表示
 
-for _f in ("Yu Gothic", "Meiryo", "MS Gothic", "IPAexGothic", "Noto Sans CJK JP"):
+from matplotlib import font_manager
+
+for _f in ("Yu Gothic", "Meiryo", "MS Gothic", "IPAexGothic", "IPAGothic", "Noto Sans CJK JP", "TakaoGothic"):
+    try:  # 実際に入っている最初の日本語フォントを使う
+        font_manager.findfont(_f, fallback_to_default=False)
+    except ValueError:
+        continue
     matplotlib.rcParams["font.family"] = [_f, "sans-serif"]
     break
 
@@ -349,7 +355,7 @@ def draw_coast(ax, elev, extent, show_elev=True):
                         colors="#5a4632", linewidths=0.9, zorder=0.5)  # 濃い茶色(黒の等温線と区別)
         G["gray"] += [cs, *cs.clabel(fmt="%dm", fontsize=8, inline=True)]
 
-    ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=2.5)
+    G["coast"] = [ax.contour(lons, lats, land.astype(float), levels=[0.5], colors="#444", linewidths=0.8, zorder=2.5)]
     return G
 
 
@@ -486,31 +492,42 @@ def chart_frame(arr):
     return cols.min(), cols.max(), rows.min(), rows.max()
 
 
+_chart_geo = {}  # (枠, 画像サイズ, 範囲) -> 変換の座標と重み。天気図ごとに作り直さない
+
+
 def chart_overlay(path, extent, alpha):
     """天気図を緯度経度の格子(extent=(経度0,経度1,緯度0,緯度1))に変形し、白を透明にしたRGBAを返す。"""
     from PIL import Image
-    arr = np.asarray(Image.open(path).convert("RGB")).astype(float)
+    arr = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32)
     xl, xr, yt, yb = chart_frame(arr)
-    W = float(xr - xl)
-    lon0, lon1, lat0, lat1 = extent
-    nx = int(min(1600, max(600, (lon1 - lon0) * 400)))
-    ny = int(nx * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
-    lons = np.linspace(lon0, lon1, nx)
-    lats = np.linspace(lat1, lat0, ny)
-    LO, LA = np.meshgrid(lons, lats)
-    rho = CHART_S * np.tan(np.radians((90 - LA) / 2))
-    dl = np.radians(LO - 140.0)
-    px = xl + (CHART_U0 + rho * np.sin(dl)) * W
-    py = yt + (CHART_V0 + rho * np.cos(dl)) * W
-    inside = (px >= xl) & (px <= xr) & (py >= yt) & (py <= yb)
-    x0 = np.clip(np.floor(px).astype(int), 0, arr.shape[1] - 2)
-    y0 = np.clip(np.floor(py).astype(int), 0, arr.shape[0] - 2)
-    fx, fy = (px - x0)[..., None], (py - y0)[..., None]
-    rgb = (arr[y0, x0] * (1 - fx) * (1 - fy) + arr[y0, x0 + 1] * fx * (1 - fy)
-           + arr[y0 + 1, x0] * (1 - fx) * fy + arr[y0 + 1, x0 + 1] * fx * fy)  # 双一次補間
-    dark = 1.0 - rgb.min(axis=2) / 255.0  # 白=0(透明) 線=濃いほど不透明
+    key = (int(xl), int(xr), int(yt), int(yb), arr.shape, tuple(extent))
+    geo = _chart_geo.get(key)
+    if geo is None:
+        W = float(xr - xl)
+        lon0, lon1, lat0, lat1 = extent
+        nx = int(min(1100, max(600, (lon1 - lon0) * 300)))
+        ny = int(nx * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
+        LO, LA = np.meshgrid(np.linspace(lon0, lon1, nx), np.linspace(lat1, lat0, ny))
+        rho = CHART_S * np.tan(np.radians((90 - LA) / 2))
+        dl = np.radians(LO - 140.0)
+        px = xl + (CHART_U0 + rho * np.sin(dl)) * W
+        py = yt + (CHART_V0 + rho * np.cos(dl)) * W
+        inside = (px >= xl) & (px <= xr) & (py >= yt) & (py <= yb)
+        x0 = np.clip(np.floor(px).astype(int), 0, arr.shape[1] - 2)
+        y0 = np.clip(np.floor(py).astype(int), 0, arr.shape[0] - 2)
+        fx, fy = (px - x0).astype(np.float32), (py - y0).astype(np.float32)
+        geo = (x0, y0, fx, fy, inside)
+        _chart_geo.clear()
+        _chart_geo[key] = geo
+    x0, y0, fx, fy, inside = geo
+    m = arr.min(axis=2)  # 白さ(白=255)だけを先に双一次補間(色は後で)
+    w00, w10, w01, w11 = (1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy
+    def samp(a2):
+        return a2[y0, x0] * w00 + a2[y0, x0 + 1] * w10 + a2[y0 + 1, x0] * w01 + a2[y0 + 1, x0 + 1] * w11
+    rgb = np.dstack([samp(arr[..., c]) for c in range(3)])
+    dark = 1.0 - samp(m) / 255.0  # 白=0(透明) 線=濃いほど不透明
     a = np.clip(dark * 1.6, 0, 1) * alpha * inside
-    return np.dstack([rgb / 255.0, a])
+    return np.dstack([rgb / 255.0, a]).astype(np.float32)
 
 
 # ---- ウィンドプロファイラ (BUFR電文。1ファイル=複数局×直近1時間(10分おき6時刻)×高さ別の風) ----
@@ -669,7 +686,8 @@ def main():
     ap.add_argument("--dir", default=DEFAULT_DIR, help="「時別値」フォルダの親(サブフォルダも検索)")
     ap.add_argument("--start", default=None, help="再生開始日 YYYY-MM-DD (省略時はフォルダ内で最も古いファイルの開始日)")
     ap.add_argument("--end", default=None, help="再生終了日 YYYY-MM-DD (省略時は開始日の月末)")
-    ap.add_argument("--islands", action="store_true", help="離島も表示")
+    ap.add_argument("--islands", action="store_true", help="(既定でオンのため不要) 離島も表示")
+    ap.add_argument("--no-islands", action="store_true", help="離島(大島・三宅島・八丈島など)を表示しない")
     ap.add_argument("--interval", type=int, default=500, help="1時間あたりのms")
     ap.add_argument("--no-terrain", action="store_true", help="海岸線・地形を表示しない")
     ap.add_argument("--relief", action="store_true", help="海岸線でなく標高の陰影図にする")
@@ -729,7 +747,7 @@ def main():
             for n in unresolved:
                 w.writerow([n, "", "", "", ""])
         print(f"→ {os.path.basename(todo)} に地点名を書き出しました。緯度・経度を入れて「観測所一覧.csv」に足してください")
-    names = [n for n in COORDS if a.islands or n not in ISLANDS]
+    names = [n for n in COORDS if not a.no_islands or n not in ISLANDS]
     lat = np.array([COORDS[n][0] for n in names])
     lon = np.array([COORDS[n][1] for n in names])
     first_used = {}
@@ -753,8 +771,51 @@ def main():
         raise SystemExit(str(e))
 
     fig, ax = plt.subplots(figsize=(12, 8))
+    # 軽量化: 地形・文字などは1回だけ描き、気温の色分け・矢印・地点名・天気図など動く部分だけを描き直す(blitting)。
+    # 動画保存(--save)や対応しない環境では使わず、毎回全体を描く。
+    use_blit = (not a.save) and getattr(fig.canvas, "supports_blit", False)
+    persist_arts, frame_arts = [], []  # 動く部品: 常に存在するもの / コマごとに作り直すもの
+    blit = {"bg": None, "ready": False}
+    ctl = {}
+
+    def animate(arts):
+        """動く部品に登録する(通常の全体描画からは除かれ、コマごとに描き直される)"""
+        flat = []
+        for art in arts:
+            if hasattr(art, "collections") and not hasattr(art, "set_animated"):
+                flat += list(art.collections)  # 古いmatplotlibのContourSet
+            else:
+                flat.append(art)
+        if use_blit:
+            for art in flat:
+                art.set_animated(True)
+        return flat
+
+    def draw_dynamic():
+        for art in sorted(persist_arts + frame_arts, key=lambda x: x.get_zorder()):
+            ax.draw_artist(art)
+        if ctl.get("slider") is not None:
+            fig.draw_artist(ctl["slider"].ax)
+
+    def on_full_draw(_event):
+        if use_blit and blit["ready"]:
+            blit["bg"] = fig.canvas.copy_from_bbox(fig.bbox)
+            draw_dynamic()
+
+    fig.canvas.mpl_connect("draw_event", on_full_draw)
+
+    def refresh(full=False):
+        """full=True: 全体を描き直す(ボタンの文字が変わったとき等)。False: 動く部品だけ描き直す"""
+        if not (use_blit and blit["ready"]) or full or blit["bg"] is None:
+            fig.canvas.draw_idle()
+            return
+        fig.canvas.restore_region(blit["bg"])
+        draw_dynamic()
+        fig.canvas.blit(fig.bbox)
+        fig.canvas.flush_events()
+
     plt.subplots_adjust(left=0.07, right=0.78, top=0.94, bottom=0.2)
-    bg = {"gray": []}
+    bg = {"gray": [], "coast": []}
     if not a.no_terrain:
         m = 0.15
         box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
@@ -773,6 +834,7 @@ def main():
                 draw_terrain(ax, elev, ext)
             else:
                 bg = draw_coast(ax, elev, ext, show_elev=not a.no_elev)
+                persist_arts.extend(animate(bg.get("coast", [])))  # 海岸線は気温の色の上に重ねる
         except Exception as e:
             print("地形の取得に失敗したため地形なしで続行:", e)
     ax.set_xlim(lon.min() - 0.15, lon.max() + 0.15)
@@ -802,6 +864,7 @@ def main():
                          zorder=2.2, aspect="auto")
     chart_im.set_visible(False)
     ax.set_xlim(xlim); ax.set_ylim(ylim)
+    persist_arts.extend(animate([chart_im]))
     chart_cache = {}
     dots = ax.scatter(lon, lat, s=6, c="k", zorder=2.6)
     pts_arts = [dots]
@@ -809,6 +872,7 @@ def main():
     for n, x, y in zip(names, lon, lat):
         name_arts.append(ax.annotate(n, (x, y), xytext=(8, -3), textcoords="offset points", fontsize=7))
     missing = np.zeros(len(names), bool)  # 気温も風も空欄の地点(地点名を出さない)
+    persist_arts.extend(animate([dots] + name_arts))
 
     # ---- 気温: 補間した等温線(線+数値)と等温帯(色)。右側に凡例 ----
     cmap = plt.get_cmap("RdYlBu_r")
@@ -832,16 +896,59 @@ def main():
     kern = np.exp(-0.5 * (np.arange(-kk, kk + 1) / sig) ** 2)
     kern /= kern.sum()
 
-    def smooth(field):
-        """欠測(マスク)を無視した正規化ガウス平滑化"""
-        valid = ~np.ma.getmaskarray(field)
-        v = np.where(valid, np.ma.filled(field, 0.0), 0.0)
+    def conv_axis(arr, axis):
+        """ガウスカーネルとの畳み込み(端は0埋め)。ずらして足し合わせるだけなので速い"""
+        out = np.zeros_like(arr)
+        n = arr.shape[axis]
+        for k, w in zip(range(-kk, kk + 1), kern):
+            if w < 1e-6 or abs(k) >= n:
+                continue
+            src, dst = [slice(None)] * 2, [slice(None)] * 2
+            if k >= 0:
+                src[axis], dst[axis] = slice(k, n), slice(0, n - k)
+            else:
+                src[axis], dst[axis] = slice(0, n + k), slice(-k, n)
+            out[tuple(dst)] += w * arr[tuple(src)]
+        return out
 
-        def conv(mm):
-            mm = np.apply_along_axis(lambda r: np.convolve(r, kern, mode="same"), 1, mm)
-            return np.apply_along_axis(lambda c: np.convolve(c, kern, mode="same"), 0, mm)
-        num, den = conv(v), conv(valid.astype(float))
-        return np.ma.masked_where(~valid | (den < 1e-3), num / np.maximum(den, 1e-3))
+    interp_cache = {}  # 気温がある地点の組み合わせごとに、補間の重み・マスク・平滑化の分母を保存
+
+    def interp_geom(ok):
+        key = ok.tobytes()
+        g = interp_cache.get(key)
+        if g is None:
+            if len(interp_cache) >= 12:
+                interp_cache.clear()
+            lo, la = lon[ok], lat[ok]
+            tri = matplotlib.tri.Triangulation(lo, la)
+            idx = tri.get_trifinder()(GX, GY)
+            inside = idx >= 0
+            tris = tri.triangles[idx[inside]]
+            x, y = lo[tris], la[tris]
+            px, py = GX[inside], GY[inside]
+            det = (y[:, 1] - y[:, 2]) * (x[:, 0] - x[:, 2]) + (x[:, 2] - x[:, 1]) * (y[:, 0] - y[:, 2])
+            det = np.where(det == 0, 1.0, det)
+            l1 = ((y[:, 1] - y[:, 2]) * (px - x[:, 2]) + (x[:, 2] - x[:, 1]) * (py - y[:, 2])) / det
+            l2 = ((y[:, 2] - y[:, 0]) * (px - x[:, 2]) + (x[:, 0] - x[:, 2]) * (py - y[:, 2])) / det
+            bary = np.stack([l1, l2, 1 - l1 - l2], axis=1)  # 重心座標(観測値の範囲を超えない補間)
+            mask = ~inside
+            if a.reach > 0:  # 最も近い観測地点から遠い格子は塗らない
+                coslat = np.cos(np.radians(lat.mean()))
+                d2 = np.full(GX.shape, np.inf)
+                wx, wy = int(a.reach / (gstep * coslat)) + 2, int(a.reach / gstep) + 2
+                for x0, y0 in zip(lo, la):
+                    ix, iy = int((x0 - gx[0]) / gstep), int((y0 - gy[0]) / gstep)
+                    sx = slice(max(ix - wx, 0), ix + wx + 1)
+                    sy = slice(max(iy - wy, 0), iy + wy + 1)
+                    d2[sy, sx] = np.minimum(d2[sy, sx], ((GX[sy, sx] - x0) * coslat) ** 2 + (GY[sy, sx] - y0) ** 2)
+                mask = mask | (d2 > a.reach ** 2)
+            den = None
+            if a.smooth > 0:
+                den = conv_axis(conv_axis((~mask).astype(float), 1), 0)
+                mask = mask | (den < 1e-3)
+            g = (inside, tris, bary, mask, den)
+            interp_cache[key] = g
+        return g
 
     def clear_temp():
         for c in contours:
@@ -865,26 +972,18 @@ def main():
         if ok.sum() < 4:
             return
         try:
-            tri = matplotlib.tri.Triangulation(lon[ok], lat[ok])
-            z = matplotlib.tri.LinearTriInterpolator(tri, t[ok])(GX, GY)  # 観測値の範囲を超えない
-            if a.reach > 0:  # 最も近い観測地点から遠い格子は塗らない
-                coslat = np.cos(np.radians(lat.mean()))
-                d2 = np.full(GX.shape, np.inf)
-                wx, wy = int(a.reach / (gstep * coslat)) + 2, int(a.reach / gstep) + 2  # 地点周囲の窓(格子数)
-                for x0, y0 in zip(lon[ok], lat[ok]):
-                    ix, iy = int((x0 - gx[0]) / gstep), int((y0 - gy[0]) / gstep)
-                    sx = slice(max(ix - wx, 0), ix + wx + 1)
-                    sy = slice(max(iy - wy, 0), iy + wy + 1)
-                    d2[sy, sx] = np.minimum(d2[sy, sx], ((GX[sy, sx] - x0) * coslat) ** 2 + (GY[sy, sx] - y0) ** 2)
-                z = np.ma.masked_where(d2 > a.reach ** 2, z)
-            if a.smooth > 0:
-                z = smooth(z)
+            inside, tris, bary, mask, den = interp_geom(ok)
+            z = np.zeros(GX.shape)
+            z[inside] = (bary * t[ok][tris]).sum(axis=1)  # 観測値の範囲を超えない線形補間
+            if den is not None:  # 平滑化(欠測・範囲外を無視した正規化ガウス)
+                z = conv_axis(conv_axis(np.where(mask, 0.0, z), 1), 0) / np.maximum(den, 1e-3)
+            z = np.ma.masked_array(z, mask=mask)
             lv, nm = st["levels"], st["norm"]
-            contours.append(ax.contourf(GX, GY, z, levels=lv, cmap=cmap, norm=nm,
-                                        extend="both", alpha=0.6, zorder=1))
+            cf = ax.contourf(GX, GY, z, levels=lv, cmap=cmap, norm=nm, extend="both", alpha=0.6, zorder=1)
             cl = ax.contour(GX, GY, z, levels=lv, colors="k", linewidths=0.5, alpha=0.7, zorder=2)
-            contours.append(cl)
+            contours.extend([cf, cl])
             labels.extend(cl.clabel(fmt="%g", fontsize=7, inline=True, inline_spacing=3))
+            frame_arts.extend(animate([cf, cl] + labels))
         except Exception as e:
             print("等温線を描けませんでした:", e)
 
@@ -902,6 +1001,7 @@ def main():
         if ok.any():
             qh["q"] = ax.quiver(lon[ok], lat[ok], u[ok], v[ok], angles="xy",
                                 scale_units="xy", scale=25, width=0.003, zorder=3)
+            frame_arts.extend(animate([qh["q"]]))
 
     # ---- 風速の凡例: 右側(カラーバーの下)。本体の矢印と同じ長さ(ピクセル)で描く ----
     lax = fig.add_axes([0.80, 0.22, 0.19, 0.24])
@@ -952,10 +1052,12 @@ def main():
 
     fig.canvas.mpl_connect("draw_event", draw_wind_legend)
     title = ax.set_title("")
+    persist_arts.extend(animate([title]))
 
     on_time = []  # 時刻が変わったときに呼ぶ関数(日のプルダウンの同期など)
 
-    def update(i):
+    def update(i, full=False):
+        frame_arts.clear()
         draw_temp(S["temp"][i])
         draw_wind(i)
         missing[:] = np.isnan(S["temp"][i]) & np.isnan(S["wind"][i])
@@ -986,6 +1088,7 @@ def main():
                 wp_state["q"] = ax.quiver(wl, wa, wu, wv, angles="xy", scale_units="xy", scale=25, width=0.004,
                                           color="#7b1fa2", zorder=3.2)
                 wp_state["mk"] = ax.scatter(wl, wa, marker="^", s=28, color="#7b1fa2", zorder=3.3)
+                frame_arts.extend(animate([wp_state["q"], wp_state["mk"]]))
                 chart_note += f"   プロファイラ {wp_state['height']}m"
         path = chart_idx.get(utc)
         if path and show["chart"]:
@@ -998,7 +1101,7 @@ def main():
         else:
             chart_im.set_visible(False)
         title.set_text(f"{S['times'][i]}{chart_note}   [{VERSION.split()[0]}]")
-        fig.canvas.draw_idle()
+        refresh(full)
 
     if a.save:
         anim = FuncAnimation(fig, lambda i: update(i), frames=len(S["times"]), interval=a.interval)
@@ -1010,12 +1113,16 @@ def main():
     # 下段: [-1年 -1月 -1日 -1時間] 時刻スライダー [+1時間 +1日 +1月 +1年] 再生/停止
     state = {"i": 0, "playing": False}
     slider = Slider(plt.axes([0.26, 0.04, 0.29, 0.03]), "時刻", 0, len(S["times"]) - 1, valinit=0, valstep=1)
-    btn = Button(plt.axes([0.81, 0.03, 0.09, 0.05]), "再生/停止")
+    btn = Button(plt.axes([0.81, 0.03, 0.09, 0.05]), "再生/停止", hovercolor="0.85")
+    ctl["slider"] = slider
+    if use_blit:
+        slider.ax.set_animated(True)  # スライダーも動く部品として描き直す
+        slider.drawon = False
     steps = [("年", 0.010, -12), ("月", 0.062, -1), ("日", 0.114, -24), ("時間", 0.166, -1),
              ("時間", 0.585, 1), ("日", 0.637, 24), ("月", 0.689, 1), ("年", 0.741, 12)]
     step_btns = []
     for unit, x0, d in steps:
-        bt = Button(plt.axes([x0, 0.03, 0.05, 0.05]), f"{'+' if d > 0 else '-'}1{unit}")
+        bt = Button(plt.axes([x0, 0.03, 0.05, 0.05]), f"{'+' if d > 0 else '-'}1{unit}", hovercolor="0.85")
         bt.label.set_fontsize(8)
         step_btns.append((bt, unit, d))
     avail = scan_months(a.dir)
@@ -1036,7 +1143,7 @@ def main():
     # 表示のON/OFF: ☑/☐ のトグルボタン (CheckButtonsの×印の代わり)
     toggles = {}
     for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"), ("chart", "天気図"), ("wp", "高層風"))):
-        tg = Button(plt.axes([0.915, 0.195 - 0.03 * k, 0.08, 0.026]), "", color="white", hovercolor="0.92")
+        tg = Button(plt.axes([0.915, 0.195 - 0.03 * k, 0.08, 0.026]), "", color="white", hovercolor="white")
         tg.label.set_fontsize(10)
         toggles[key] = (tg, label)
 
@@ -1048,7 +1155,7 @@ def main():
         def cb(_):
             show[key] = not show[key]
             refresh_toggle(key)
-            update(state["i"])
+            update(state["i"], full=True)
         return cb
 
     for key in toggles:
@@ -1076,7 +1183,7 @@ def main():
         state["i"] = nearest_index(target) if target else 0
         slider.set_val(state["i"])
         sync_ym(y, m)
-        update(state["i"])
+        update(state["i"], full=True)
 
     def nearest_index(dt):
         ts = [parse_time(t) for t in S["times"]]
@@ -1188,8 +1295,24 @@ def main():
 
     slider.on_changed(on_slide)
     btn.on_clicked(lambda e: state.update(playing=not state["playing"]))
-    anim = FuncAnimation(fig, tick, interval=a.interval, cache_frame_data=False)
-    update(0)
+    if use_blit:  # 保存時の画像にも動く部品が入るように、保存の間だけ通常描画に戻す
+        _orig_savefig = fig.savefig
+
+        def savefig(*args, **kw):
+            arts = persist_arts + frame_arts + [slider.ax]
+            for x in arts:
+                x.set_animated(False)
+            try:
+                return _orig_savefig(*args, **kw)
+            finally:
+                for x in arts:
+                    x.set_animated(True)
+        fig.savefig = savefig
+    play_timer = fig.canvas.new_timer(interval=a.interval)
+    play_timer.add_callback(lambda: tick(None))
+    play_timer.start()
+    blit["ready"] = True
+    update(0, full=True)
     plt.show()
 
 
