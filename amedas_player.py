@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.16 (変更時は VERSION 定数も更新)
+バージョン: v3.17 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.16 (地図が横に伸びる不具合を修正)"
+VERSION = "v3.17 (関東中心の範囲で描画)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -284,6 +284,7 @@ def despike(temp, thr, stations, times):
     return out
 
 
+DEFAULT_VIEW = (138.0, 141.2, 33.0, 37.7)  # 既定の地図の範囲(経度0, 経度1, 緯度0, 緯度1)
 REF_POINT = (36.0, 139.7)  # 同名の地点が複数あるとき、この点(関東の中心)に最も近いものを採用する
 TABLE = {}  # 観測所一覧CSVの地点名 -> [(緯度, 経度, 標高, 都道府県), ...]
 
@@ -670,6 +671,9 @@ def main():
     ap.add_argument("--wp-dir", default=None, help="ウィンドプロファイラのフォルダ(省略時はスクリプトと同じ場所の、名前に「プロファイラ」を含むフォルダ)")
     ap.add_argument("--no-wp", action="store_true", help="ウィンドプロファイラを重ねない")
     ap.add_argument("--wp-debug", action="store_true", help="ウィンドプロファイラの読み込み状況を表示(原因調べ用)")
+    ap.add_argument("--extent", type=float, nargs=4, metavar=("経度0", "経度1", "緯度0", "緯度1"),
+                    help="地図に描く範囲(度)。省略時は関東地方を中心にした範囲(東北南部・中部東部の一部を含む)")
+    ap.add_argument("--all-area", action="store_true", help="範囲を決めず、読み込んだ地点が全部入る範囲で描く")
     ap.add_argument("--step", type=float, default=2.0, help="等温線の間隔(℃)")
     ap.add_argument("--save", help="GIF/MP4で保存")
     a = ap.parse_args()
@@ -715,10 +719,19 @@ def main():
             for n in unresolved:
                 w.writerow([n, "", "", "", ""])
         print(f"→ {os.path.basename(todo)} に地点名を書き出しました。緯度・経度を入れて「観測所一覧.csv」に足してください")
-    far = [n for n in COORDS if math.hypot((COORDS[n][0] - REF_POINT[0]) * 111, (COORDS[n][1] - REF_POINT[1]) * 91) > 700]
-    if far:  # 関東から700km以上離れた地点: 同名の別の場所を選んでいないか確認用
-        print("※関東から遠い地点があります(地図の範囲が広がります): " + "、".join(f"{n}({COORDS[n][0]:.1f}N,{COORDS[n][1]:.1f}E)" for n in far))
     names = [n for n in all_names if n in COORDS and (not a.no_islands or n not in ISLANDS)]
+    # 地図に描く四角い範囲: 既定は関東地方を中心に、東北南部(福島県など)・中部東部(新潟・長野・山梨・静岡)の一部が入る範囲
+    if a.extent:
+        view = tuple(a.extent)
+    elif a.all_area:
+        view = (min(COORDS[n][1] for n in names) - 0.15, max(COORDS[n][1] for n in names) + 0.15,
+                min(COORDS[n][0] for n in names) - 0.15, max(COORDS[n][0] for n in names) + 0.15)
+    else:
+        view = (DEFAULT_VIEW[0], DEFAULT_VIEW[1], DEFAULT_VIEW[2] if not a.no_islands else 34.8, DEFAULT_VIEW[3])
+    # 範囲の外側に少し離れた地点も補間には使う(範囲の端でも気温の分布が途切れないように)。表示は範囲の中だけ。
+    mg = 0.6
+    names = [n for n in names if view[0] - mg <= COORDS[n][1] <= view[1] + mg and view[2] - mg <= COORDS[n][0] <= view[3] + mg]
+    print(f"地図の範囲: 東経{view[0]:.1f}〜{view[1]:.1f}度, 北緯{view[2]:.1f}〜{view[3]:.1f}度  (地点 {len(names)} 件)")
     lat = np.array([COORDS[n][0] for n in names])
     lon = np.array([COORDS[n][1] for n in names])
     first_used = {}
@@ -790,7 +803,7 @@ def main():
     bg = {"gray": [], "coast": []}
     if not a.no_terrain:
         m = 0.15
-        box = (lon.min() - m, lon.max() + m, lat.min() - m, lat.max() + m)
+        box = (view[0] - m, view[1] + m, view[2] - m, view[3] + m)
         try:
             z = a.zoom
             while z > 4:  # 広域ではタイルが多すぎるので、60枚以下になるまでズームを下げる
@@ -809,9 +822,9 @@ def main():
                 persist_arts.extend(animate(bg.get("coast", [])))  # 海岸線は気温の色の上に重ねる
         except Exception as e:
             print("地形の取得に失敗したため地形なしで続行:", e)
-    ax.set_xlim(lon.min() - 0.15, lon.max() + 0.15)
-    ax.set_ylim(lat.min() - 0.15, lat.max() + 0.15)
-    geo_aspect = 1 / np.cos(np.radians(lat.mean()))  # 緯度経度を実際の距離の比に合わせる
+    ax.set_xlim(view[0], view[1])
+    ax.set_ylim(view[2], view[3])
+    geo_aspect = 1 / np.cos(np.radians((view[2] + view[3]) / 2))  # 緯度経度を実際の距離の比に合わせる
     ax.set_aspect(geo_aspect)
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
@@ -868,9 +881,9 @@ def main():
     contours, labels = [], []
 
     # 平滑化用の格子 (約0.02度刻み)
-    gstep = max(0.0125, max(lon.max() - lon.min(), lat.max() - lat.min()) / 700)  # 度/格子
-    gx = np.linspace(lon.min() - 0.1, lon.max() + 0.1, int((lon.max() - lon.min() + 0.2) / gstep) + 1)
-    gy = np.linspace(lat.min() - 0.1, lat.max() + 0.1, int((lat.max() - lat.min() + 0.2) / gstep) + 1)
+    gstep = max(0.0125, max(view[1] - view[0], view[3] - view[2]) / 700)  # 度/格子
+    gx = np.linspace(view[0] - 0.1, view[1] + 0.1, int((view[1] - view[0] + 0.2) / gstep) + 1)
+    gy = np.linspace(view[2] - 0.1, view[3] + 0.1, int((view[3] - view[2] + 0.2) / gstep) + 1)
     GX, GY = np.meshgrid(gx, gy)
     sig = max(a.smooth, 0.1) * 0.011 / gstep  # 関東(0.011度/格子)と同じ強さになるよう度に換算
     kk = int(3 * sig) + 1
@@ -930,7 +943,7 @@ def main():
             bary = np.stack([l1, l2, 1 - l1 - l2], axis=1)  # 重心座標(観測値の範囲を超えない補間)
             mask = ~inside
             if a.reach > 0:  # 最も近い観測地点から遠い格子は塗らない
-                coslat = np.cos(np.radians(lat.mean()))
+                coslat = np.cos(np.radians((view[2] + view[3]) / 2))
                 d2 = np.full(GX.shape, np.inf)
                 wx, wy = int(a.reach / (gstep * coslat)) + 2, int(a.reach / gstep) + 2
                 for x0, y0 in zip(lo, la):
@@ -1006,8 +1019,8 @@ def main():
     legend_state = {"px": None}
 
     def draw_wind_legend(_=None):
-        p0 = ax.transData.transform((lon.min(), lat.min()))
-        p1 = ax.transData.transform((lon.min() + 1.0, lat.min()))
+        p0 = ax.transData.transform((view[0], view[2]))
+        p1 = ax.transData.transform((view[0] + 1.0, view[2]))
         px_deg = p1[0] - p0[0]  # 経度1度あたりのピクセル数
         if legend_state["px"] is not None and abs(legend_state["px"] - px_deg) < 0.5:
             return
