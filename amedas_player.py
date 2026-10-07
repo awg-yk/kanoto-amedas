@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.12 (変更時は VERSION 定数も更新)
+バージョン: v3.13 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -31,10 +31,10 @@ import matplotlib.tri
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Button, Slider, TextBox
+from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.12 (離島を既定で表示・軽量化)"
+VERSION = "v3.13 (ボタン式の切り替え・±12時間・stations.jsonのみで座標)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -50,94 +50,7 @@ for _f in ("Yu Gothic", "Meiryo", "MS Gothic", "IPAexGothic", "IPAGothic", "Noto
     matplotlib.rcParams["font.family"] = [_f, "sans-serif"]
     break
 
-# 地点座標 (緯度, 経度, 標高m)。気象庁の観測所一覧(観測所ID付きの表)の値。
-COORDS = {
-    "北茨城": (36.833333, 140.771667, 5),
-    "大子": (36.778333, 140.345, 120),
-    "常陸大宮": (36.606667, 140.325, 95),
-    "日立": (36.58, 140.645, 34),
-    "笠間": (36.395, 140.24, 72),
-    "水戸": (36.38, 140.466667, 29),
-    "古河": (36.201667, 139.716667, 20),
-    "下館": (36.281667, 139.988333, 24),
-    "下妻": (36.168333, 139.945, 20),
-    "鉾田": (36.168333, 140.526667, 32),
-    "つくば（館野）": (36.056667, 140.125, 25),
-    "土浦": (36.103333, 140.22, 26),
-    "鹿嶋": (35.963333, 140.621667, 37),
-    "龍ケ崎": (35.89, 140.211667, 4),
-    "那須高原": (37.123333, 140.035, 749),
-    "五十里": (36.921667, 139.695, 620),
-    "黒磯": (36.981667, 140.018333, 343),
-    "土呂部": (36.891667, 139.568333, 925),
-    "大田原": (36.84, 140.035, 188),
-    "奥日光（日光）": (36.738333, 139.5, 1292),
-    "日光東町": (36.75, 139.615, 561),
-    "塩谷": (36.756667, 139.883333, 225),
-    "那須烏山": (36.641667, 140.116667, 82),
-    "鹿沼": (36.591667, 139.735, 165),
-    "宇都宮": (36.548333, 139.868333, 119),
-    "真岡": (36.476667, 139.986667, 91),
-    "佐野": (36.363333, 139.57, 68),
-    "小山": (36.338333, 139.83, 44),
-    "藤原": (36.863333, 139.058333, 700),
-    "みなかみ": (36.773333, 138.965, 524),
-    "草津": (36.616667, 138.591667, 1223),
-    "沼田": (36.668333, 139.021667, 390),
-    "中之条": (36.586667, 138.85, 354),
-    "田代": (36.463333, 138.463333, 1230),
-    "前橋": (36.405, 139.06, 112),
-    "桐生": (36.41, 139.325, 117),
-    "上里見": (36.376667, 138.895, 183),
-    "伊勢崎": (36.331667, 139.165, 64),
-    "西野牧": (36.245, 138.706667, 375),
-    "館林": (36.24, 139.513333, 23),
-    "神流": (36.108333, 138.896667, 357),
-    "寄居": (36.105, 139.183333, 128),
-    "熊谷": (36.15, 139.38, 30),
-    "久喜": (36.086667, 139.635, 12),
-    "秩父": (35.99, 139.073333, 232),
-    "鳩山": (35.985, 139.335, 44),
-    "さいたま": (35.875, 139.586667, 8),
-    "越谷": (35.883333, 139.756667, 3),
-    "所沢": (35.773333, 139.413333, 119),
-    "小河内": (35.791667, 139.05, 530),
-    "青梅": (35.788333, 139.311667, 155),
-    "練馬": (35.738333, 139.591667, 51),
-    "八王子": (35.666667, 139.316667, 123),
-    "府中": (35.683333, 139.483333, 59),
-    "東京": (35.691667, 139.75, 25),
-    "江戸川臨海": (35.638333, 139.863333, 5),
-    "羽田": (35.553333, 139.78, 6),
-    "大島": (34.748333, 139.361667, 74),
-    "大島北ノ山": (34.781667, 139.36, 38),
-    "新島": (34.368333, 139.268333, 29),
-    "神津島": (34.188333, 139.133333, 138),
-    "三宅島": (34.123333, 139.52, 38),
-    "三宅坪田": (34.073333, 139.56, 20),
-    "八重見ヶ原": (33.115, 139.785, 92),
-    "八丈島": (33.121667, 139.778333, 151),
-    "我孫子": (35.863333, 140.11, 20),
-    "香取": (35.858333, 140.501667, 37),
-    "船橋": (35.711667, 140.043333, 28),
-    "佐倉": (35.728333, 140.211667, 5),
-    "成田": (35.763333, 140.385, 41),
-    "銚子": (35.738333, 140.856667, 20),
-    "横芝光": (35.655, 140.505, 5),
-    "千葉": (35.601667, 140.103333, 3),
-    "茂原": (35.436667, 140.293333, 11),
-    "木更津": (35.361667, 139.94, 60),
-    "牛久": (35.396667, 140.148333, 30),
-    "坂畑": (35.235, 140.098333, 120),
-    "鴨川": (35.111667, 140.1, 5),
-    "勝浦": (35.15, 140.311667, 12),
-    "館山": (34.986667, 139.865, 6),
-    "海老名": (35.433333, 139.386667, 18),
-    "横浜": (35.438333, 139.651667, 39),
-    "辻堂": (35.32, 139.45, 5),
-    "小田原": (35.276667, 139.155, 14),
-    "三浦": (35.178333, 139.63, 42),
-}
+COORDS = {}  # 地点名 -> (緯度, 経度, 標高m)。実行時に stations.json(観測所一覧)から作る
 
 DIRS = ["北", "北北東", "北東", "東北東", "東", "東南東", "南東", "南南東",
         "南", "南南西", "南西", "西南西", "西", "西北西", "北西", "北北西"]
@@ -371,6 +284,7 @@ def despike(temp, thr, stations, times):
     return out
 
 
+REF_POINT = (36.0, 139.7)  # 同名の地点が複数あるとき、この点(関東の中心)に最も近いものを採用する
 TABLE = {}  # 観測所一覧CSVの地点名 -> [(緯度, 経度, 標高, 都道府県), ...]
 
 
@@ -394,8 +308,11 @@ def load_station_table(folders):
             n = 0
             for it in items:
                 try:
+                    d_from = datetime.date.fromisoformat(it["observedFrom"]) if it.get("observedFrom") else None
+                    d_to = datetime.date.fromisoformat(it["observedTo"]) if it.get("observedTo") else None
                     TABLE.setdefault(it["name"].strip(), []).append(
-                        (float(it["lat"]), float(it["lon"]), int(it.get("alt") or 0), it.get("prefecture", "")))
+                        (float(it["lat"]), float(it["lon"]), int(it.get("alt") or 0), it.get("prefecture", ""),
+                         d_from, d_to, not it.get("discontinued", False)))
                     n += 1
                 except (KeyError, ValueError, TypeError, AttributeError):
                     continue
@@ -426,108 +343,60 @@ def load_station_table(folders):
                 try:
                     TABLE.setdefault(r[ci].strip(), []).append(
                         (float(r[cla]), float(r[clo]), int(float(r[cel])) if cel is not None and r[cel] else 0,
-                         r[cpr] if cpr is not None else ""))
+                         r[cpr] if cpr is not None else "", None, None, True))
                     n += 1
                 except (ValueError, IndexError):
                     continue
             print(f"観測所一覧: {n} 地点を読み込み ({os.path.basename(f)})")
 
 
-def resolve_coord(name):
-    """CSVの地点名から座標を探す。「つくば（館野）」のような括弧付きは括弧を除いた名前でも探す。"""
+def resolve_coord(name, when=None, verbose=False):
+    """CSVの地点名から (緯度, 経度, 標高) を探す。「つくば（館野）」のような括弧付きは括弧を除いた名前でも探す。
+    同じ名前が複数あるとき: データの日付(when)に観測していた旧地点があればそれを、なければ現役の地点を選び、
+    それでも複数なら関東の中心(REF_POINT)に最も近いものを選ぶ。"""
     base = re.sub(r"[（(].*?[）)]", "", name).strip()
     for key in (name, base):
-        if key in TABLE:
-            c = TABLE[key]
-            if len(c) > 1:  # 同名(例: 府中)が複数 → 関東の地点群の中心に最も近いものを採用
-                ref_lat = sum(v[0] for v in COORDS.values()) / len(COORDS)
-                ref_lon = sum(v[1] for v in COORDS.values()) / len(COORDS)
-                c = sorted(c, key=lambda v: (v[0] - ref_lat) ** 2 + ((v[1] - ref_lon) * 0.82) ** 2)
-                print(f"  同名の地点が複数あります({key}): {c[0][3]} を使います")
-            return c[0][:3]
+        if key not in TABLE:
+            continue
+        cands = TABLE[key]
+        if len(cands) > 1:
+            pool = cands
+            if when is not None:
+                cover = [c for c in cands if (c[4] is None or c[4] <= when) and (c[5] is None or when <= c[5])]
+                pool = [c for c in cover if not c[6]] or [c for c in cover if c[6]] or cands
+            if len(pool) > 1:  # 同名(例: 川内)が複数 → 関東の中心に最も近いものを採用
+                ref_lat, ref_lon = REF_POINT
+                pool = sorted(pool, key=lambda v: (v[0] - ref_lat) ** 2 + ((v[1] - ref_lon) * 0.82) ** 2)
+                if verbose:
+                    print(f"  同名の地点が複数あります({key}): {pool[0][3]} を使います")
+            c = pool[0]
+        else:
+            c = cands[0]
+        return c[:3]
     return None
 
 
-# 気象庁の地上天気図: 東経140度を中心とした極ステレオ投影。枠の幅Wを1とした座標で表す。
-#   rho = CHART_S * tan((90-緯度)/2),  u = U0 + rho*sin(経度-140),  v = V0 + rho*cos(経度-140)
-#   (u,v)は枠の左上が原点。2000年1月1日00Zと2025年12月31日12Zの図の経緯線(20-50N, 120-160E)から決めた値。
-CHART_U0, CHART_V0, CHART_S = 0.5906, -0.495, 2.117
-CHART_RE = re.compile(r"(?<!\d)(\d{4})[-_./]?(\d{2})[-_./]?(\d{2})[-_./ T]?(\d{2})(?:UTC|utc|[zZ])?(?!\d)")
-CHART_EXT = (".png", ".gif", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
-
-
-def index_charts(folder):
-    """天気図フォルダ(サブフォルダ含む)のファイル名から 時刻(UTC) -> ファイル の対応表を作る。
-    ファイル名に 年月日+時(例: 2000010100 / 2000-01-01_00z / 2000.01.01.00UTC)が入っていれば読める。"""
-    idx = {}
-    if not os.path.isdir(folder):
-        return idx
-    for root, _, files in os.walk(folder):
-        for fn in files:
-            if not fn.lower().endswith(CHART_EXT):
-                continue
-            m = None
-            for cand in (fn, os.path.join(os.path.relpath(root, folder), fn)):
-                m = CHART_RE.search(cand)
-                if m:
-                    break
-            if not m:
-                continue
-            try:
-                key = datetime.datetime(int(m[1]), int(m[2]), int(m[3]), int(m[4]))
-            except ValueError:
-                continue
-            path = os.path.join(root, fn)
-            if key not in idx or fn.lower().endswith(".png"):
-                idx[key] = path
-    return idx
-
-
-def chart_frame(arr):
-    """画像から天気図の枠(黒い長方形)を見つける。戻り値 (左, 右, 上, 下) の画素位置。"""
-    dark = arr.min(axis=2) < 110
-    cc, rc = dark.sum(axis=0), dark.sum(axis=1)
-    cols = np.where(cc > 0.6 * cc.max())[0]
-    rows = np.where(rc > 0.6 * rc.max())[0]
-    return cols.min(), cols.max(), rows.min(), rows.max()
-
-
-_chart_geo = {}  # (枠, 画像サイズ, 範囲) -> 変換の座標と重み。天気図ごとに作り直さない
-
-
-def chart_overlay(path, extent, alpha):
-    """天気図を緯度経度の格子(extent=(経度0,経度1,緯度0,緯度1))に変形し、白を透明にしたRGBAを返す。"""
-    from PIL import Image
-    arr = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32)
-    xl, xr, yt, yb = chart_frame(arr)
-    key = (int(xl), int(xr), int(yt), int(yb), arr.shape, tuple(extent))
-    geo = _chart_geo.get(key)
-    if geo is None:
-        W = float(xr - xl)
-        lon0, lon1, lat0, lat1 = extent
-        nx = int(min(1100, max(600, (lon1 - lon0) * 300)))
-        ny = int(nx * (lat1 - lat0) / ((lon1 - lon0) * math.cos(math.radians((lat0 + lat1) / 2))))
-        LO, LA = np.meshgrid(np.linspace(lon0, lon1, nx), np.linspace(lat1, lat0, ny))
-        rho = CHART_S * np.tan(np.radians((90 - LA) / 2))
-        dl = np.radians(LO - 140.0)
-        px = xl + (CHART_U0 + rho * np.sin(dl)) * W
-        py = yt + (CHART_V0 + rho * np.cos(dl)) * W
-        inside = (px >= xl) & (px <= xr) & (py >= yt) & (py <= yb)
-        x0 = np.clip(np.floor(px).astype(int), 0, arr.shape[1] - 2)
-        y0 = np.clip(np.floor(py).astype(int), 0, arr.shape[0] - 2)
-        fx, fy = (px - x0).astype(np.float32), (py - y0).astype(np.float32)
-        geo = (x0, y0, fx, fy, inside)
-        _chart_geo.clear()
-        _chart_geo[key] = geo
-    x0, y0, fx, fy, inside = geo
-    m = arr.min(axis=2)  # 白さ(白=255)だけを先に双一次補間(色は後で)
-    w00, w10, w01, w11 = (1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy
-    def samp(a2):
-        return a2[y0, x0] * w00 + a2[y0, x0 + 1] * w10 + a2[y0 + 1, x0] * w01 + a2[y0 + 1, x0 + 1] * w11
-    rgb = np.dstack([samp(arr[..., c]) for c in range(3)])
-    dark = 1.0 - samp(m) / 255.0  # 白=0(透明) 線=濃いほど不透明
-    a = np.clip(dark * 1.6, 0, 1) * alpha * inside
-    return np.dstack([rgb / 255.0, a]).astype(np.float32)
+def scan_station_names(folder):
+    """全CSVの「地点名の行」だけを読んで、データ全体に出てくる地点名の一覧を作る(年によって地点が違うため)。"""
+    names, seen = [], set()
+    n_files = 0
+    for f in sorted(glob.glob(os.path.join(folder, "**", PATTERN), recursive=True)):
+        if not FNAME_RE.search(os.path.basename(f)):
+            continue
+        n_files += 1
+        try:
+            with open(f, encoding="utf-8-sig", errors="replace") as fh:
+                for _ in range(8):
+                    cells = fh.readline().rstrip("\r\n").split(",")
+                    if len(cells) > 8 and cells[0] == "" and cells[1] != "":
+                        for n in cells[1:]:
+                            n = n.strip()
+                            if n and n not in seen:
+                                seen.add(n); names.append(n)
+                        break
+        except OSError:
+            continue
+    return names, n_files
 
 
 # ---- ウィンドプロファイラ (BUFR電文。1ファイル=複数局×直近1時間(10分おき6時刻)×高さ別の風) ----
@@ -726,18 +595,22 @@ def main():
     # 表示する地点は座標表(COORDS)で固定し、CSV側に無い地点は欠測(NaN)にする。
     # これで年月を切り替えても地点・地図の枠は変わらない。
     load_station_table([a.dir, os.path.dirname(os.path.abspath(__file__))])
+    if not TABLE:
+        raise SystemExit("観測所一覧(stations.json)が見つかりません。amedas_player.py と同じフォルダに置いてください。")
     try:
         first = load(a.dir, start, end)
     except FileNotFoundError as e:
         raise SystemExit(str(e))
+    all_names, n_files = scan_station_names(a.dir)  # 全期間に出てくる地点(年が違っても地図の地点を固定できる)
+    all_names += [n for n in first[0] if n not in all_names]
+    print(f"地点名: {len(all_names)} 件 (CSV {n_files} ファイルから)")
     unresolved = []
-    for st_name in first[0]:  # 組み込みの関東の座標に無い地点(他の地域)は、観測所一覧から探す
-        if st_name not in COORDS:
-            c = resolve_coord(st_name)
-            if c:
-                COORDS[st_name] = c
-            else:
-                unresolved.append(st_name)
+    for st_name in all_names:
+        c = resolve_coord(st_name, start, verbose=True)
+        if c:
+            COORDS[st_name] = c
+        else:
+            unresolved.append(st_name)
     if unresolved:
         print(f"座標未登録(地図に出しません) {len(unresolved)} 地点: " + "、".join(unresolved))
         todo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "観測所一覧_不足.csv")
@@ -747,10 +620,11 @@ def main():
             for n in unresolved:
                 w.writerow([n, "", "", "", ""])
         print(f"→ {os.path.basename(todo)} に地点名を書き出しました。緯度・経度を入れて「観測所一覧.csv」に足してください")
-    names = [n for n in COORDS if not a.no_islands or n not in ISLANDS]
+    names = [n for n in all_names if n in COORDS and (not a.no_islands or n not in ISLANDS)]
     lat = np.array([COORDS[n][0] for n in names])
     lon = np.array([COORDS[n][1] for n in names])
     first_used = {}
+    pos_hooks = []  # 月が変わったとき、地点の位置を更新する関数(あとで登録)
     S = {}  # 現在表示中のデータ: times, temp, wind, wdir
 
     def read(d0, d1):
@@ -763,6 +637,8 @@ def main():
         idx = [stations.index(n) if n in stations else -1 for n in names]
         pick = lambda arr: np.stack([arr[:, k] if k >= 0 else np.full(len(times), np.nan) for k in idx], axis=1)
         S.update(times=times, temp=pick(temp), wind=pick(wind), wdir=pick(wdir), start=d0, end=d1)
+        for fn in pos_hooks:
+            fn(d0)
         print(f"{d0} 〜 {d1}: {len(times)} 時刻")
 
     try:
@@ -794,8 +670,6 @@ def main():
     def draw_dynamic():
         for art in sorted(persist_arts + frame_arts, key=lambda x: x.get_zorder()):
             ax.draw_artist(art)
-        if ctl.get("slider") is not None:
-            fig.draw_artist(ctl["slider"].ax)
 
     def on_full_draw(_event):
         if use_blit and blit["ready"]:
@@ -896,6 +770,21 @@ def main():
     kern = np.exp(-0.5 * (np.arange(-kk, kk + 1) / sig) ** 2)
     kern /= kern.sum()
 
+    def update_positions(when):
+        """移転した観測所は、データの日付に合う地点の位置に直す(stations.jsonの観測期間を使う)"""
+        moved = 0
+        for k, n in enumerate(names):
+            c = resolve_coord(n, when)
+            if c and (abs(c[0] - lat[k]) > 1e-6 or abs(c[1] - lon[k]) > 1e-6):
+                lat[k], lon[k] = c[0], c[1]
+                moved += 1
+        if moved:
+            dots.set_offsets(np.column_stack([lon, lat]))
+            for art, x, y in zip(name_arts, lon, lat):
+                art.xy = (x, y)
+            interp_cache.clear()
+            print(f"{when:%Y-%m}: 移転・廃止前の地点位置に {moved} 地点を更新")
+
     def conv_axis(arr, axis):
         """ガウスカーネルとの畳み込み(端は0埋め)。ずらして足し合わせるだけなので速い"""
         out = np.zeros_like(arr)
@@ -912,6 +801,7 @@ def main():
         return out
 
     interp_cache = {}  # 気温がある地点の組み合わせごとに、補間の重み・マスク・平滑化の分母を保存
+    pos_hooks.append(update_positions)
 
     def interp_geom(ok):
         key = ok.tobytes()
@@ -1097,7 +987,7 @@ def main():
                 chart_cache[path] = chart_overlay(path, (xlim[0], xlim[1], ylim[0], ylim[1]), a.chart_alpha)
             chart_im.set_data(chart_cache[path])
             chart_im.set_visible(True)
-            chart_note = f"   天気図 {utc:%Y.%m.%d} {utc:%H}UTC"
+            pass  # 天気図の時刻は図の中に書かれているので、タイトルには出さない
         else:
             chart_im.set_visible(False)
         title.set_text(f"{S['times'][i]}{chart_note}   [{VERSION.split()[0]}]")
@@ -1110,21 +1000,24 @@ def main():
         return
 
     # ---- 操作部 ----
-    # 下段: [-1年 -1月 -1日 -1時間] 時刻スライダー [+1時間 +1日 +1月 +1年] 再生/停止
+    # 下段: [-1年 -1月 -1日 -12時間 -1時間] 再生/停止 [+1時間 +12時間 +1日 +1月 +1年]
+    # その上の段: 表示の切り替えボタン(オンのとき色が変わる)
     state = {"i": 0, "playing": False}
-    slider = Slider(plt.axes([0.26, 0.04, 0.29, 0.03]), "時刻", 0, len(S["times"]) - 1, valinit=0, valstep=1)
-    btn = Button(plt.axes([0.81, 0.03, 0.09, 0.05]), "再生/停止", hovercolor="0.85")
-    ctl["slider"] = slider
-    if use_blit:
-        slider.ax.set_animated(True)  # スライダーも動く部品として描き直す
-        slider.drawon = False
-    steps = [("年", 0.010, -12), ("月", 0.062, -1), ("日", 0.114, -24), ("時間", 0.166, -1),
-             ("時間", 0.585, 1), ("日", 0.637, 24), ("月", 0.689, 1), ("年", 0.741, 12)]
+    ON_COLOR, OFF_COLOR = "#8ec3e6", "0.85"
+
+    def set_index(i):
+        state["i"] = int(i)
+        update(state["i"])
+
+    btn = Button(plt.axes([0.455, 0.03, 0.09, 0.05]), "再生/停止", color=OFF_COLOR, hovercolor=OFF_COLOR)
+    steps = [("-1年", "y", -1), ("-1月", "m", -1), ("-1日", "h", -24), ("-12時間", "h", -12), ("-1時間", "h", -1),
+             ("+1時間", "h", 1), ("+12時間", "h", 12), ("+1日", "h", 24), ("+1月", "m", 1), ("+1年", "y", 1)]
     step_btns = []
-    for unit, x0, d in steps:
-        bt = Button(plt.axes([x0, 0.03, 0.05, 0.05]), f"{'+' if d > 0 else '-'}1{unit}", hovercolor="0.85")
+    for k, (label, kind, amount) in enumerate(steps):
+        x0 = 0.08 + 0.072 * k if k < 5 else 0.565 + 0.072 * (k - 5)
+        bt = Button(plt.axes([x0, 0.03, 0.068, 0.05]), label, hovercolor="0.85")
         bt.label.set_fontsize(8)
-        step_btns.append((bt, unit, d))
+        step_btns.append((bt, kind, amount))
     avail = scan_months(a.dir)
     ym = {"cy": None, "cm": None, "cd": None}
     use_tk = False
@@ -1137,30 +1030,8 @@ def main():
         use_tk = False
     tb = None
     if not use_tk:  # プルダウンが使えない環境では、これまでどおり入力欄
-        tb = TextBox(plt.axes([0.30, 0.10, 0.09, 0.05]), "年月 ", initial=f"{S['start'].year}-{S['start'].month:02d}")
-    msg = fig.text(0.15, 0.165, "", fontsize=9, color="crimson")
-
-    # 表示のON/OFF: ☑/☐ のトグルボタン (CheckButtonsの×印の代わり)
-    toggles = {}
-    for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"), ("chart", "天気図"), ("wp", "高層風"))):
-        tg = Button(plt.axes([0.915, 0.195 - 0.03 * k, 0.08, 0.026]), "", color="white", hovercolor="white")
-        tg.label.set_fontsize(10)
-        toggles[key] = (tg, label)
-
-    def refresh_toggle(key):
-        tg, label = toggles[key]
-        tg.label.set_text(("☑ " if show[key] else "☐ ") + label)
-
-    def make_toggle_cb(key):
-        def cb(_):
-            show[key] = not show[key]
-            refresh_toggle(key)
-            update(state["i"], full=True)
-        return cb
-
-    for key in toggles:
-        refresh_toggle(key)
-        toggles[key][0].on_clicked(make_toggle_cb(key))
+        tb = TextBox(plt.axes([0.80, 0.10, 0.09, 0.05]), "年月 ", initial=f"{S['start'].year}-{S['start'].month:02d}")
+    msg = fig.text(0.08, 0.165, "", fontsize=9, color="crimson")
 
     def load_month(y, m, target=None):
         """指定の年月を読み込んで表示を切り替える。CSVが無い場合は元の表示のまま。
@@ -1178,10 +1049,7 @@ def main():
             sync_ym(S["start"].year, S["start"].month); fig.canvas.draw_idle(); return
         msg.set_text("")
         state["playing"] = False
-        slider.valmax = len(S["times"]) - 1
-        slider.ax.set_xlim(slider.valmin, slider.valmax)
         state["i"] = nearest_index(target) if target else 0
-        slider.set_val(state["i"])
         sync_ym(y, m)
         update(state["i"], full=True)
 
@@ -1196,22 +1064,22 @@ def main():
         """dt へ移動。読み込み済みの月の外なら、その月のCSVを読み込む。"""
         if S["start"] <= dt.date() <= S["end"]:
             state["playing"] = False
-            slider.set_val(nearest_index(dt))
+            set_index(nearest_index(dt))
         else:
             load_month(dt.year, dt.month, target=dt)
 
-    def move(unit, d):
+    def move(kind, amount):
         cur = current_time()
-        if unit in ("年", "月"):  # 同じ日・時刻のまま月/年を動かす(月末は日を詰める)
-            k = cur.year * 12 + cur.month - 1 + (d if unit == "月" else d)
+        if kind in ("y", "m"):  # 同じ日・時刻のまま月/年を動かす(月末は日を詰める)
+            k = cur.year * 12 + cur.month - 1 + (amount * 12 if kind == "y" else amount)
             y, m = k // 12, k % 12 + 1
             day = min(cur.day, calendar.monthrange(y, m)[1])
             go_to(cur.replace(year=y, month=m, day=day))
         else:
-            go_to(cur + datetime.timedelta(hours=d))
+            go_to(cur + datetime.timedelta(hours=amount))
 
-    for bt, unit, d in step_btns:
-        bt.on_clicked(lambda e, unit=unit, d=d: move(unit, d))
+    for bt, kind, amount in step_btns:
+        bt.on_clicked(lambda e, kind=kind, amount=amount: move(kind, amount))
 
     def on_submit(text):
         try:
@@ -1286,20 +1154,48 @@ def main():
     else:
         tb.on_submit(on_submit)
 
-    def on_slide(v):
-        state["i"] = int(v); update(state["i"])
+    # 表示の切り替えボタン: オンのとき色が変わる (チェックボックスの代わり)
+    toggles = {}
+    for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"),
+                                      ("chart", "天気図"), ("wp", "高層風"))):
+        tg = Button(plt.axes([0.08 + 0.08 * k, 0.10, 0.075, 0.05]), label, color=ON_COLOR, hovercolor=ON_COLOR)
+        tg.label.set_fontsize(9)
+        toggles[key] = tg
+
+    def refresh_toggle(key):
+        c = ON_COLOR if show[key] else OFF_COLOR
+        tg = toggles[key]
+        tg.color = tg.hovercolor = c
+        tg.ax.set_facecolor(c)
+
+    def make_toggle_cb(key):
+        def cb(_):
+            show[key] = not show[key]
+            refresh_toggle(key)
+            update(state["i"], full=True)
+        return cb
+
+    for key in toggles:
+        refresh_toggle(key)
+        toggles[key].on_clicked(make_toggle_cb(key))
 
     def tick(_):
         if state["playing"]:
-            slider.set_val((state["i"] + 1) % len(S["times"]))
+            set_index((state["i"] + 1) % len(S["times"]))
 
-    slider.on_changed(on_slide)
-    btn.on_clicked(lambda e: state.update(playing=not state["playing"]))
+    def on_play(_):
+        state["playing"] = not state["playing"]
+        c = ON_COLOR if state["playing"] else OFF_COLOR
+        btn.color = btn.hovercolor = c
+        btn.ax.set_facecolor(c)
+        fig.canvas.draw_idle()
+
+    btn.on_clicked(on_play)
     if use_blit:  # 保存時の画像にも動く部品が入るように、保存の間だけ通常描画に戻す
         _orig_savefig = fig.savefig
 
         def savefig(*args, **kw):
-            arts = persist_arts + frame_arts + [slider.ax]
+            arts = persist_arts + frame_arts
             for x in arts:
                 x.set_animated(False)
             try:
