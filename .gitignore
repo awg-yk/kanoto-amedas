@@ -3,3 +3,4 @@ node_modules/
 __pycache__/
 *.npz
 観測所一覧_不足.csv
+読込キャッシュ/

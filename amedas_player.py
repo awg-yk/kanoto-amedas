@@ -13,6 +13,7 @@ import argparse
 import calendar
 import csv
 import functools
+import hashlib
 import operator
 import datetime
 import glob
@@ -22,6 +23,7 @@ import math
 import os
 import re
 import ssl
+import time
 import urllib.error
 import urllib.request
 
@@ -36,7 +38,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.22"
+VERSION = "v3.23"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -76,35 +78,85 @@ def _floats(body, getter):
         return np.array([[_num(v) for v in getter(r)] for r in body], dtype=float)
 
 
+CSV_WANT = {"names": None, "cache_dir": None}  # 地図で使う地点だけを取り出す/読み込み結果の保存先(実行時に設定)
+
+
+def _split_rows(lines):
+    """CSVの行を列に分ける。引用符の無い行は split で(csv モジュールより速い)"""
+    out = []
+    for ln in lines:
+        out.append(ln.split(",") if '"' not in ln else next(csv.reader([ln])))
+    return out
+
+
+def _pack10(a):
+    """0.1刻みの値を10倍の整数で保存(小さく、読み戻しても元の値と同じ)。欠測は -32768"""
+    return np.where(np.isnan(a), -32768, np.round(np.nan_to_num(a) * 10)).astype(np.int16)
+
+
+def _unpack10(a):
+    return np.where(a == -32768, np.nan, a.astype(float) / 10)
+
+
 def parse_csv(path):
-    """気象庁形式CSV。1地点8列: 気温,品質,均質,風速,品質,風向,品質,均質"""
-    mt = os.path.getmtime(path)
-    hit = _csv_cache.get(path)
+    """気象庁形式CSV。1地点8列: 気温,品質,均質,風速,品質,風向,品質,均質
+    CSV_WANT["names"] があれば、その地点の列だけを取り出す。
+    CSV_WANT["cache_dir"] があれば、読み込み結果を .npz に保存し、次からはそれを読む(2回目以降はすぐ開く)。"""
+    want = CSV_WANT["names"]
+    st_ = os.stat(path)
+    mt = (st_.st_mtime, st_.st_size)
+    key = (path, None if want is None else len(want))
+    hit = _csv_cache.get(key)
     if hit and hit[0] == mt:
         return hit[1]
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.reader(f))
-    name_row = next(i for i, r in enumerate(rows) if len(r) > 8 and r[0] == "" and r[1] != "")  # 地点名の行(空行は飛ばす)
-    names = rows[name_row]
+    npz = None
+    if want is not None and CSV_WANT["cache_dir"]:
+        tag = hashlib.md5(("|".join(sorted(want)) + f"|{mt}|{os.path.abspath(path)}").encode("utf-8")).hexdigest()[:16]
+        npz = os.path.join(CSV_WANT["cache_dir"], f"{os.path.splitext(os.path.basename(path))[0]}_{tag}.npz")
+        if os.path.exists(npz):
+            try:
+                with np.load(npz) as d:
+                    out = (list(d["stations"]), list(d["times"])) + tuple(_unpack10(d[k]) for k in ("temp", "wind", "wdir"))
+                _csv_cache[key] = (mt, out)
+                return out
+            except Exception:
+                pass  # 壊れていたら読み直す
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        lines = f.read().splitlines()
+    head = _split_rows(lines[:12])
+    name_row = next(i for i, r in enumerate(head) if len(r) > 8 and r[0] == "" and r[1] != "")  # 地点名の行(空行は飛ばす)
+    names = head[name_row]
     starts, stations = [], []
     for i in range(1, len(names)):
-        if names[i] and names[i] != names[i - 1]:
+        if names[i] and names[i] != names[i - 1] and (want is None or names[i].strip() in want):
             starts.append(i)
             stations.append(names[i].strip())
     width = len(names)
-    body = [r if len(r) >= width else r + [""] * (width - len(r)) for r in rows[name_row + 1:] if r and "/" in r[0]]
+    body = [r if len(r) >= width else r + [""] * (width - len(r))
+            for r in _split_rows(ln for ln in lines[name_row + 1:] if "/" in ln[:12])]
     times = [r[0].strip() for r in body]
-    col = lambda off: operator.itemgetter(*[k + off for k in starts]) if len(starts) > 1 else (lambda r: [r[starts[0] + off]])
-    temp = _floats(body, col(0)).reshape(len(body), len(starts))
-    wind = _floats(body, col(3)).reshape(len(body), len(starts))
-    lut = {v: k for k, v in enumerate(DIRS)}
-    lut["静穏"] = -1
-    gd = col(5)
-    wdir = np.array([[lut.get(v.strip(), np.nan) for v in gd(r)] for r in body], dtype=float).reshape(len(body), len(starts))
-    out = (stations, times, temp, wind, wdir)
+    if not starts:
+        z = np.zeros((len(body), 0))
+        out = (stations, times, z, z.copy(), z.copy())
+    else:
+        col = lambda off: operator.itemgetter(*[k + off for k in starts]) if len(starts) > 1 else (lambda r: [r[starts[0] + off]])
+        temp = _floats(body, col(0)).reshape(len(body), len(starts))
+        wind = _floats(body, col(3)).reshape(len(body), len(starts))
+        lut = {v: k for k, v in enumerate(DIRS)}
+        lut["静穏"] = -1
+        gd = col(5)
+        wdir = np.array([[lut.get(v.strip(), np.nan) for v in gd(r)] for r in body], dtype=float).reshape(len(body), len(starts))
+        out = (stations, times, temp, wind, wdir)
     if len(_csv_cache) >= 8:
         _csv_cache.pop(next(iter(_csv_cache)))
-    _csv_cache[path] = (mt, out)
+    _csv_cache[key] = (mt, out)
+    if npz:
+        try:
+            os.makedirs(CSV_WANT["cache_dir"], exist_ok=True)
+            np.savez(npz, stations=np.array(stations, dtype=str), times=np.array(times, dtype=str),
+                     temp=_pack10(out[2]), wind=_pack10(out[3]), wdir=_pack10(out[4]))
+        except OSError:
+            pass
     return out
 
 
@@ -754,6 +806,8 @@ def main():
     print(f"地図の範囲: 東経{view[0]:.1f}〜{view[1]:.1f}度, 北緯{view[2]:.1f}〜{view[3]:.1f}度  (地点 {len(names)} 件)")
     lat = np.array([COORDS[n][0] for n in names])
     lon = np.array([COORDS[n][1] for n in names])
+    CSV_WANT["names"] = set(names)  # 以後は地図で使う地点の列だけ読む
+    CSV_WANT["cache_dir"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "読込キャッシュ")
     first_used = {}
     pos_hooks = []  # 月が変わったとき、地点の位置を更新する関数(あとで登録)
     S = {}  # 現在表示中のデータ: times, temp, wind, wdir
@@ -1224,6 +1278,7 @@ def main():
             msg.set_text("年月は YYYY-MM の形式で入力してください"); fig.canvas.draw_idle(); return
         msg.set_text(f"{y}-{m:02d} を読み込み中 ..."); refresh()  # 動く部品だけ描き直す(全体の描き直しは重い)
         old = dict(S)
+        t0 = time.perf_counter()
         try:
             read(d0, d1)
         except FileNotFoundError:
@@ -1233,7 +1288,9 @@ def main():
         state["playing"] = False
         state["i"] = nearest_index(target) if target else 0
         sync_ym(y, m)
+        t1 = time.perf_counter()
         update(state["i"])
+        print(f"  月の切り替え: 読み込み {t1 - t0:.2f} 秒 / 描画 {time.perf_counter() - t1:.2f} 秒")
 
     def nearest_index(dt):
         ts = [parse_time(t) for t in S["times"]]
