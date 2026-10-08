@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.17 (変更時は VERSION 定数も更新)
+バージョン: v3.18 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.17 (関東中心の範囲で描画)"
+VERSION = "v3.18 (元の天気図と凡例を地図の左側へ)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -799,7 +799,7 @@ def main():
         fig.canvas.blit(fig.bbox)
         fig.canvas.flush_events()
 
-    plt.subplots_adjust(left=0.07, right=0.78, top=0.94, bottom=0.2)
+    plt.subplots_adjust(left=0.27, right=0.86, top=0.94, bottom=0.2)  # 左の列: 天気図・凡例 / 中央: 地図 / 右: カラーバー
     bg = {"gray": [], "coast": []}
     if not a.no_terrain:
         m = 0.15
@@ -853,7 +853,7 @@ def main():
     ax.set_aspect(geo_aspect)
     persist_arts.extend(animate([chart_im]))
     # 右上: 拡大していない元の天気図(小さく)。天気図のある時刻だけ表示する
-    iax = fig.add_axes([0.835, 0.735, 0.15, 0.225])
+    iax = fig.add_axes([0.02, 0.64, 0.21, 0.31])  # 左上: 拡大していない元の天気図
     iax.axis("off")
     im_in = iax.imshow(np.zeros((2, 2, 3)), aspect="equal")
     im_in.set_visible(False)
@@ -875,7 +875,7 @@ def main():
     tmax = np.ceil((a.tmax if a.tmax is not None else 40.0) / a.step) * a.step
     st = {"levels": np.arange(tmin, tmax + a.step / 2, a.step)}
     st["norm"] = matplotlib.colors.BoundaryNorm(st["levels"], cmap.N, extend="both")
-    cax = fig.add_axes([0.82, 0.44, 0.02, 0.27])  # 右上は天気図の小さな表示に空ける
+    cax = fig.add_axes([0.90, 0.32, 0.02, 0.50])  # 右: 気温のカラーバー
     fig.colorbar(matplotlib.cm.ScalarMappable(norm=st["norm"], cmap=cmap), cax=cax,
                  label="気温 (℃)", ticks=st["levels"][::max(1, int(round(5 / a.step)))])
     contours, labels = [], []
@@ -1014,7 +1014,7 @@ def main():
             frame_arts.extend(animate([qh["q"]]))
 
     # ---- 風速の凡例: 右側(カラーバーの下)。本体の矢印と同じ長さ(ピクセル)で描く ----
-    lax = fig.add_axes([0.80, 0.21, 0.19, 0.20])
+    lax = fig.add_axes([0.02, 0.36, 0.23, 0.22])  # 左: 風速の凡例
     lax.axis("off")
     legend_state = {"px": None}
 
@@ -1039,7 +1039,7 @@ def main():
         fig.canvas.draw_idle()
 
     if bg["gray"] and not a.relief:
-        eax = fig.add_axes([0.82, 0.16, 0.09, 0.015])
+        eax = fig.add_axes([0.04, 0.27, 0.17, 0.015])  # 左: 標高の凡例
         eax.imshow(np.linspace(0.97, 0.67, 100)[None, :].repeat(2, 0), cmap="gray", vmin=0, vmax=1,
                    aspect="auto", extent=(0, 2500, 0, 1))
         eax.set_yticks([]); eax.set_xticks([0, 500, 1000, 1500, 2000, 2500])
