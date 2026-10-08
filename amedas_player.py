@@ -12,6 +12,8 @@
 import argparse
 import calendar
 import csv
+import functools
+import concurrent.futures
 import datetime
 import glob
 import io
@@ -34,7 +36,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.20 (凡例のクリックで表示のオン/オフ)"
+VERSION = "v3.21"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -89,6 +91,7 @@ def parse_csv(path):
     return stations, times, np.array(temp), np.array(wind), np.array(wdir)
 
 
+@functools.lru_cache(maxsize=4096)
 def parse_time(t):
     """'2000/1/7 12:00:00' でも '2000/1/7 12:00'(Excelで保存し直したCSV)でも読めるようにする"""
     for f in ("%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
@@ -738,8 +741,31 @@ def main():
     pos_hooks = []  # 月が変わったとき、地点の位置を更新する関数(あとで登録)
     S = {}  # 現在表示中のデータ: times, temp, wind, wdir
 
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    month_cache = {}  # (月初, 月末) -> 読み込み(予約)結果。前後の月を先に裏で読んでおく
+
+    def fetch(d0, d1):
+        if (d0, d1) not in month_cache:
+            if len(month_cache) >= 4:
+                month_cache.pop(next(iter(month_cache)))
+            month_cache[(d0, d1)] = pool.submit(load, a.dir, d0, d1)
+        return month_cache[(d0, d1)]
+
+    def prefetch(d0):
+        for k in (1, -1):  # 次の月、前の月
+            y, m = divmod(d0.year * 12 + d0.month - 1 + k, 12)
+            try:
+                r = month_range(y, m + 1)
+            except ValueError:
+                continue
+            if find_files(a.dir, *r):
+                fetch(*r)
+
     def read(d0, d1):
-        stations, times, temp, wind, wdir = first if (d0, d1) == (start, end) and "used" not in first_used else load(a.dir, d0, d1)
+        if (d0, d1) == (start, end) and "used" not in first_used:
+            stations, times, temp, wind, wdir = first
+        else:
+            stations, times, temp, wind, wdir = fetch(d0, d1).result()
         first_used["used"] = True
         if not times:
             raise FileNotFoundError(f"{d0}〜{d1} のデータ行がありません")
@@ -751,6 +777,7 @@ def main():
         for fn in pos_hooks:
             fn(d0)
         print(f"{d0} 〜 {d1}: {len(times)} 時刻")
+        prefetch(d0)
 
     try:
         read(start, end)
@@ -1198,7 +1225,8 @@ def main():
             d0, d1 = month_range(y, m)
         except ValueError:
             msg.set_text("年月は YYYY-MM の形式で入力してください"); fig.canvas.draw_idle(); return
-        msg.set_text(f"{y}-{m:02d} を読み込み中 ..."); fig.canvas.draw()
+        if (d0, d1) not in month_cache or not month_cache[(d0, d1)].done():
+            msg.set_text(f"{y}-{m:02d} を読み込み中 ..."); fig.canvas.draw()
         old = dict(S)
         try:
             read(d0, d1)
