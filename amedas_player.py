@@ -13,7 +13,7 @@ import argparse
 import calendar
 import csv
 import functools
-import concurrent.futures
+import operator
 import datetime
 import glob
 import io
@@ -36,7 +36,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.21"
+VERSION = "v3.22"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -65,8 +65,23 @@ def _num(s):
         return np.nan
 
 
+_csv_cache = {}  # ファイル -> (更新時刻, 読み込み結果)。前後の月へ行き来しても読み直さない
+
+
+def _floats(body, getter):
+    """各行から指定の列を取り出して数値の表にする(空欄は NaN)"""
+    try:
+        return np.array([[float(v) if v else np.nan for v in getter(r)] for r in body], dtype=float)
+    except ValueError:  # まれに記号つきの値があるときだけ、1つずつ確かめながら変換
+        return np.array([[_num(v) for v in getter(r)] for r in body], dtype=float)
+
+
 def parse_csv(path):
     """気象庁形式CSV。1地点8列: 気温,品質,均質,風速,品質,風向,品質,均質"""
+    mt = os.path.getmtime(path)
+    hit = _csv_cache.get(path)
+    if hit and hit[0] == mt:
+        return hit[1]
     with open(path, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.reader(f))
     name_row = next(i for i, r in enumerate(rows) if len(r) > 8 and r[0] == "" and r[1] != "")  # 地点名の行(空行は飛ばす)
@@ -76,19 +91,21 @@ def parse_csv(path):
         if names[i] and names[i] != names[i - 1]:
             starts.append(i)
             stations.append(names[i].strip())
-    times, temp, wind, wdir = [], [], [], []
-    for r in rows[name_row + 1:]:
-        if not r or "/" not in r[0]:
-            continue
-        times.append(r[0].strip())
-        temp.append([_num(r[s]) for s in starts])
-        wind.append([_num(r[s + 3]) for s in starts])
-        d = []
-        for s in starts:
-            v = r[s + 5].strip() if s + 5 < len(r) else ""
-            d.append(-1 if v == "静穏" else (DIRS.index(v) if v in DIRS else np.nan))
-        wdir.append(d)
-    return stations, times, np.array(temp), np.array(wind), np.array(wdir)
+    width = len(names)
+    body = [r if len(r) >= width else r + [""] * (width - len(r)) for r in rows[name_row + 1:] if r and "/" in r[0]]
+    times = [r[0].strip() for r in body]
+    col = lambda off: operator.itemgetter(*[k + off for k in starts]) if len(starts) > 1 else (lambda r: [r[starts[0] + off]])
+    temp = _floats(body, col(0)).reshape(len(body), len(starts))
+    wind = _floats(body, col(3)).reshape(len(body), len(starts))
+    lut = {v: k for k, v in enumerate(DIRS)}
+    lut["静穏"] = -1
+    gd = col(5)
+    wdir = np.array([[lut.get(v.strip(), np.nan) for v in gd(r)] for r in body], dtype=float).reshape(len(body), len(starts))
+    out = (stations, times, temp, wind, wdir)
+    if len(_csv_cache) >= 8:
+        _csv_cache.pop(next(iter(_csv_cache)))
+    _csv_cache[path] = (mt, out)
+    return out
 
 
 @functools.lru_cache(maxsize=4096)
@@ -741,31 +758,11 @@ def main():
     pos_hooks = []  # 月が変わったとき、地点の位置を更新する関数(あとで登録)
     S = {}  # 現在表示中のデータ: times, temp, wind, wdir
 
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    month_cache = {}  # (月初, 月末) -> 読み込み(予約)結果。前後の月を先に裏で読んでおく
-
-    def fetch(d0, d1):
-        if (d0, d1) not in month_cache:
-            if len(month_cache) >= 4:
-                month_cache.pop(next(iter(month_cache)))
-            month_cache[(d0, d1)] = pool.submit(load, a.dir, d0, d1)
-        return month_cache[(d0, d1)]
-
-    def prefetch(d0):
-        for k in (1, -1):  # 次の月、前の月
-            y, m = divmod(d0.year * 12 + d0.month - 1 + k, 12)
-            try:
-                r = month_range(y, m + 1)
-            except ValueError:
-                continue
-            if find_files(a.dir, *r):
-                fetch(*r)
-
     def read(d0, d1):
         if (d0, d1) == (start, end) and "used" not in first_used:
             stations, times, temp, wind, wdir = first
         else:
-            stations, times, temp, wind, wdir = fetch(d0, d1).result()
+            stations, times, temp, wind, wdir = load(a.dir, d0, d1)
         first_used["used"] = True
         if not times:
             raise FileNotFoundError(f"{d0}〜{d1} のデータ行がありません")
@@ -777,7 +774,6 @@ def main():
         for fn in pos_hooks:
             fn(d0)
         print(f"{d0} 〜 {d1}: {len(times)} 時刻")
-        prefetch(d0)
 
     try:
         read(start, end)
@@ -1217,6 +1213,7 @@ def main():
     if not use_tk:  # プルダウンが使えない環境では、これまでどおり入力欄
         tb = TextBox(plt.axes([0.80, 0.10, 0.09, 0.05]), "年月 ", initial=f"{S['start'].year}-{S['start'].month:02d}")
     msg = fig.text(0.08, 0.165, "", fontsize=9, color="crimson")
+    persist_arts.extend(animate([msg]))
 
     def load_month(y, m, target=None):
         """指定の年月を読み込んで表示を切り替える。CSVが無い場合は元の表示のまま。
@@ -1225,8 +1222,7 @@ def main():
             d0, d1 = month_range(y, m)
         except ValueError:
             msg.set_text("年月は YYYY-MM の形式で入力してください"); fig.canvas.draw_idle(); return
-        if (d0, d1) not in month_cache or not month_cache[(d0, d1)].done():
-            msg.set_text(f"{y}-{m:02d} を読み込み中 ..."); fig.canvas.draw()
+        msg.set_text(f"{y}-{m:02d} を読み込み中 ..."); refresh()  # 動く部品だけ描き直す(全体の描き直しは重い)
         old = dict(S)
         try:
             read(d0, d1)
@@ -1237,7 +1233,7 @@ def main():
         state["playing"] = False
         state["i"] = nearest_index(target) if target else 0
         sync_ym(y, m)
-        update(state["i"], full=True)
+        update(state["i"])
 
     def nearest_index(dt):
         ts = [parse_time(t) for t in S["times"]]
