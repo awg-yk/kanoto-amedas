@@ -1,6 +1,6 @@
 """関東アメダス 1時間ごと再生 (気温=等温線と色, 風向風速=矢印)
 
-バージョン: v3.19 (変更時は VERSION 定数も更新)
+バージョン: v3.20 (変更時は VERSION 定数も更新)
 
 使い方:
     python amedas_player.py                                   # 2000-01 (開始日の月末まで)
@@ -34,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, TextBox
 
 DEFAULT_DIR = os.path.dirname(os.path.abspath(__file__))  # 既定: このスクリプトのあるフォルダ(サブフォルダも検索)
-VERSION = "v3.19 (凡例を右側に集約・配置を整理)"
+VERSION = "v3.20 (凡例のクリックで表示のオン/オフ)"
 PATTERN = "時別値_*.csv"
 FNAME_RE = re.compile(r"時別値_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})")
 TMIN, TMAX = -10, 35
@@ -251,14 +251,14 @@ def draw_coast(ax, elev, extent, show_elev=True):
     lats = np.linspace(lat1, lat0, elev.shape[0])
     e = np.nan_to_num(elev, nan=0.0)
     sea = np.array([0.80, 0.88, 0.95])
-    G = {"gray": []}
+    G = {"gray": [], "flat": []}
 
     base = np.zeros(elev.shape + (3,))
     base[~land] = sea
-    if not show_elev:
-        base[land] = (0.95, 0.94, 0.90)
-        G["gray"].append(ax.imshow(base, extent=extent, origin="upper", zorder=0, aspect="auto"))
-    else:
+    flat = base.copy()
+    flat[land] = (0.95, 0.94, 0.90)  # 標高を消したときに見える、無地の陸と海
+    G["flat"].append(ax.imshow(flat, extent=extent, origin="upper", zorder=-0.1, aspect="auto"))
+    if show_elev:
         shade = LightSource(azdeg=315, altdeg=45).hillshade(e, vert_exag=8, dx=1, dy=1)
         g = np.clip((0.97 - 0.30 * np.clip(e / 2500.0, 0, 1)) * (0.6 + 0.4 * shade), 0, 1)
         gr = base.copy()
@@ -778,6 +778,15 @@ def main():
                 art.set_animated(True)
         return flat
 
+    dims = {}  # 凡例ごとの「オフのとき薄くするカバー」
+
+    def make_dim(axx, x, y, w, h, transform=None):
+        r = matplotlib.patches.Rectangle((x, y), w, h, transform=transform or axx.transAxes, fc="white", ec="none",
+                                         alpha=0.75, zorder=20, clip_on=False)
+        axx.add_artist(r)
+        r.set_visible(False)
+        return r
+
     def draw_dynamic():
         for art in sorted(persist_arts + frame_arts, key=lambda x: x.get_zorder()):
             ax.draw_artist(art)
@@ -800,7 +809,7 @@ def main():
         fig.canvas.flush_events()
 
     plt.subplots_adjust(left=0.27, right=0.70, top=0.94, bottom=0.2)  # 左: 元の天気図 / 中央: 地図 / 右: 凡例(上から 気温・風速・標高)
-    bg = {"gray": [], "coast": []}
+    bg = {"gray": [], "coast": [], "flat": []}
     if not a.no_terrain:
         m = 0.15
         box = (view[0] - m, view[1] + m, view[2] - m, view[3] + m)
@@ -829,7 +838,7 @@ def main():
     ax.grid(alpha=0.3)
     ax.set_xlabel("経度"); ax.set_ylabel("緯度")
     # 表示のON/OFF (画面下のチェックボックス)。気温・風をOFFにすると標高(灰色)だけ見える。
-    show = {"temp": True, "wind": True, "pts": True, "val": False, "chart": True, "wp": True}
+    show = {"temp": True, "wind": True, "pts": True, "val": False, "chart": True, "wp": True, "elev": True}
     wp_dir = a.wp_dir or find_wp_dir(os.path.dirname(os.path.abspath(__file__)))
     use_wp = (not a.no_wp) and os.path.isdir(wp_dir)
     if not a.no_wp:
@@ -854,10 +863,14 @@ def main():
     persist_arts.extend(animate([chart_im]))
     # 右上: 拡大していない元の天気図(小さく)。天気図のある時刻だけ表示する
     iax = fig.add_axes([0.02, 0.63, 0.22, 0.31])  # 左上: 拡大していない元の天気図(地図の上端にそろえる)
-    iax.axis("off")
     im_in = iax.imshow(np.zeros((2, 2, 3)), aspect="equal")
     im_in.set_visible(False)
-    persist_arts.extend(animate([im_in]))
+    iax.set_xticks([]); iax.set_yticks([])
+    for sp in iax.spines.values():  # 点線の枠(画像が出ていなくても、クリックする場所が分かるように)
+        sp.set_linestyle("--"); sp.set_edgecolor("0.65")
+    ph = iax.text(0.5, 0.5, "天気図", transform=iax.transAxes, ha="center", va="center", fontsize=10, color="0.45")
+    dims["chart"] = make_dim(iax, 0, 0, 1, 1)
+    persist_arts.extend(animate([im_in, ph]))
     inset_state = {"path": None}
     chart_cache = {}
     dots = ax.scatter(lon, lat, s=6, c="k", zorder=2.6)
@@ -876,6 +889,7 @@ def main():
     st = {"levels": np.arange(tmin, tmax + a.step / 2, a.step)}
     st["norm"] = matplotlib.colors.BoundaryNorm(st["levels"], cmap.N, extend="both")
     cax = fig.add_axes([0.76, 0.52, 0.02, 0.42])  # 右の列(1番目): 気温のカラーバー
+    dims["temp"] = make_dim(cax, -1.0, -0.04, 8.0, 1.08)  # カラーバーと目盛り・見出しを覆う
     fig.colorbar(matplotlib.cm.ScalarMappable(norm=st["norm"], cmap=cmap), cax=cax,
                  label="気温 (℃)", ticks=st["levels"][::max(1, int(round(5 / a.step)))])
     contours, labels = [], []
@@ -1035,9 +1049,19 @@ def main():
             lax.quiver([8], [y], [v / 25 * px_deg], [0], angles="xy", scale_units="xy", scale=1,
                        units="dots", width=width_px, color="k")
             lax.text(8 + v / 25 * px_deg + 8, y, f"{v} m/s", fontsize=9, va="center")
-        lax.text(2, 8, "黒:地上の風 紫▲:高層風(WP)", fontsize=8, va="center", color="0.3")
+        y_wp = bb.height - 40 - 32 * 3  # 高層風(紫)の行
+        lax.scatter([14], [y_wp], marker="^", s=40, color="#7b1fa2")
+        lax.quiver([28], [y_wp], [5 / 25 * px_deg], [0], angles="xy", scale_units="xy", scale=1,
+                   units="dots", width=width_px * 1.3, color="#7b1fa2")
+        lax.text(28 + 5 / 25 * px_deg + 8, y_wp, "高層風(プロファイラ)", fontsize=9, va="center", color="#7b1fa2")
+        split = y_wp + 16  # これより上=地上の風、下=高層風 (クリックで切り替える範囲)
+        legend_state["split"] = split
+        dims["wind"] = make_dim(lax, 0, split, bb.width, bb.height - split, transform=lax.transData)
+        dims["wp"] = make_dim(lax, 0, 0, bb.width, split, transform=lax.transData)
+        dims["wind"].set_visible(not show["wind"]); dims["wp"].set_visible(not show["wp"])
         fig.canvas.draw_idle()
 
+    eax = None
     if bg["gray"] and not a.relief:
         eax = fig.add_axes([0.76, 0.22, 0.17, 0.015])  # 右の列(3番目): 標高の凡例
         eax.imshow(np.linspace(0.97, 0.67, 100)[None, :].repeat(2, 0), cmap="gray", vmin=0, vmax=1,
@@ -1045,6 +1069,7 @@ def main():
         eax.set_yticks([]); eax.set_xticks([0, 500, 1000, 1500, 2000, 2500])
         eax.tick_params(labelsize=7)
         eax.set_xlabel("標高 (m)", fontsize=8)
+        dims["elev"] = make_dim(eax, -0.06, -5.0, 1.12, 7.0)
 
     def apply_view():
         """チェックボックスの状態を表示に反映する"""
@@ -1057,8 +1082,9 @@ def main():
         dots.set_edgecolor(rgba)
         if qh["q"] is not None:
             qh["q"].set_visible(show["wind"])
-        lax.set_visible(show["wind"])
-        cax.set_visible(show["temp"])
+        for key, d in dims.items():  # オフの凡例は薄くする
+            d.set_visible(not show[key])
+        set_visible(bg["gray"], show["elev"])  # 標高(灰色の陰影と等高線)のオン/オフ
 
     fig.canvas.mpl_connect("draw_event", draw_wind_legend)
     title = ax.set_title("", fontsize=18, fontweight="bold")
@@ -1120,6 +1146,8 @@ def main():
         else:
             chart_im.set_visible(False)
             im_in.set_visible(False)
+        ph.set_visible(not im_in.get_visible())  # 画像が出ていないとき、理由を枠の中に書く
+        ph.set_text("天気図\n(クリックで表示)" if not show["chart"] else "天気図なし\n(この時刻は\n9時・21時のみ)")
         title.set_text(f"{S['times'][i]}{chart_note}   [{VERSION.split()[0]}]")
         refresh(full)
 
@@ -1298,8 +1326,7 @@ def main():
 
     # 表示の切り替えボタン: オンのとき色が変わる (チェックボックスの代わり)
     toggles = {}
-    for k, (key, label) in enumerate((("temp", "気温"), ("wind", "風"), ("pts", "地点"), ("val", "数値"),
-                                      ("chart", "天気図"), ("wp", "高層風"))):
+    for k, (key, label) in enumerate((("pts", "地点"), ("val", "数値"))):
         tg = Button(plt.axes([0.08 + 0.08 * k, 0.10, 0.075, 0.05]), label, color=ON_COLOR, hovercolor=ON_COLOR)
         tg.label.set_fontsize(9)
         toggles[key] = tg
@@ -1320,6 +1347,27 @@ def main():
     for key in toggles:
         refresh_toggle(key)
         toggles[key].on_clicked(make_toggle_cb(key))
+    fig.text(0.26, 0.118, "凡例(右の列・左上の天気図)をクリックすると、その表示のオン/オフを切り替えられます",
+             fontsize=9, color="0.4")
+
+    def on_legend_click(ev):
+        """凡例をクリックして、対応する表示のオン/オフを切り替える"""
+        if ev.button != 1 or ev.inaxes is None:
+            return
+        axx, key = ev.inaxes, None
+        if axx is cax:
+            key = "temp"
+        elif axx is iax:
+            key = "chart"
+        elif eax is not None and axx is eax:
+            key = "elev"
+        elif axx is lax:
+            key = "wp" if (ev.ydata is not None and ev.ydata < legend_state.get("split", 0)) else "wind"
+        if key is not None:
+            show[key] = not show[key]
+            update(state["i"], full=True)
+
+    fig.canvas.mpl_connect("button_press_event", on_legend_click)
 
     def tick(_):
         if state["playing"]:
